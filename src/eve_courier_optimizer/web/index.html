@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta
+      name="description"
+      content="Local control deck for scanning and optimizing EVE Online public courier contracts."
+    >
+    <title>EVE Courier Route Optimizer</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace">Skip to planner</a>
+    <header class="topbar">
+      <div class="brand" aria-label="EVE Courier Route Optimizer">
+        <span class="brand-mark" aria-hidden="true">EC</span>
+        <span>
+          <strong>Courier Ops</strong>
+          <small>Route optimizer</small>
+        </span>
+      </div>
+      <div class="topbar-status">
+        <span class="pill local-pill"><span class="status-dot"></span>Local only</span>
+        <a class="pill execution-top-pill hidden" id="execution-top-pill" href="#execution-card">
+          <span class="execution-pulse" aria-hidden="true"></span>
+          <span id="execution-top-pill-text">Live route</span>
+        </a>
+        <span class="pill" id="sde-pill">SDE --</span>
+        <span class="pill" id="snapshot-pill">No snapshot</span>
+      </div>
+    </header>
+
+    <main id="workspace" class="app-shell">
+      <section class="hero panel-inset" aria-labelledby="hero-title">
+        <div>
+          <p class="eyebrow">PUBLIC COURIER CONTROL DECK</p>
+          <h1 id="hero-title">Turn market contracts into a route you can prove.</h1>
+          <p class="hero-copy">
+            Scan live public couriers, constrain the ship and session, then let the exact solver
+            maximize reward while proving what it can--and stating exactly what it cannot.
+          </p>
+        </div>
+        <div class="workflow" aria-label="Planner workflow">
+          <div class="workflow-step active" id="step-scan"><b>01</b><span>Scan</span></div>
+          <div class="workflow-line"></div>
+          <div class="workflow-step" id="step-rank"><b>02</b><span>Inspect</span></div>
+          <div class="workflow-line"></div>
+          <div class="workflow-step" id="step-solve"><b>03</b><span>Prove</span></div>
+          <div class="workflow-line"></div>
+          <div class="workflow-step" id="step-run"><b>04</b><span>Run</span></div>
+        </div>
+      </section>
+
+      <section
+        class="execution-lock-banner hidden"
+        id="execution-lock-banner"
+        aria-labelledby="execution-lock-title"
+        aria-live="polite"
+      >
+        <div class="execution-lock-flag" aria-hidden="true">LIVE</div>
+        <div class="execution-lock-copy">
+          <p class="eyebrow">PERSISTED EXECUTION SESSION</p>
+          <h2 id="execution-lock-title">A courier route is still in progress</h2>
+          <p id="execution-lock-detail">
+            Scan, Rank and Solve stay locked while accepted courier commitments are protected.
+          </p>
+        </div>
+        <div class="execution-lock-actions">
+          <button class="button secondary compact" id="resume-execution" type="button">
+            Resume current route
+          </button>
+          <button class="button secondary compact hidden" id="end-execution-banner" type="button">
+            End execution
+          </button>
+        </div>
+      </section>
+
+      <div class="planner-grid">
+        <aside class="controls panel" aria-labelledby="inputs-title">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">MISSION PARAMETERS</p>
+              <h2 id="inputs-title">Planner inputs</h2>
+            </div>
+            <button class="icon-button" id="reset-defaults" type="button" title="Restore defaults">
+              ↺
+            </button>
+          </div>
+
+          <form id="planner-form">
+            <fieldset>
+              <legend>Market scope</legend>
+              <div class="field full">
+                <span>Regions <em>search &amp; add</em></span>
+                <div class="selection-box" id="region-selection">
+                  <div class="chip-list" id="region-chips" aria-live="polite"></div>
+                  <div class="autocomplete">
+                    <input
+                      id="region-search"
+                      autocomplete="off"
+                      placeholder="Search a region…"
+                      role="combobox"
+                      aria-autocomplete="list"
+                      aria-expanded="false"
+                      aria-controls="region-options"
+                    >
+                    <div class="suggestion-menu hidden" id="region-options" role="listbox"></div>
+                  </div>
+                </div>
+                <div class="picker-actions">
+                  <button class="text-button" id="security-regions" type="button">Match security bands</button>
+                  <button class="text-button" id="empire-regions" type="button">NPC Empire</button>
+                  <button class="text-button" id="all-regions" type="button">Use all SDE regions</button>
+                  <button class="text-button muted-action" id="clear-regions" type="button">Clear</button>
+                </div>
+                <small id="region-scope-help">Security-compatible acquisition keeps mixed regions and skips regions that cannot contain a permitted pickup.</small>
+              </div>
+              <div class="field full">
+                <span>Start system <em>type to search</em></span>
+                <div class="autocomplete">
+                  <input
+                    id="start"
+                    name="start"
+                    value="Jita"
+                    autocomplete="off"
+                    placeholder="e.g. Jita"
+                    role="combobox"
+                    aria-autocomplete="list"
+                    aria-expanded="false"
+                    aria-controls="start-options"
+                    required
+                  >
+                  <div class="suggestion-menu hidden" id="start-options" role="listbox"></div>
+                </div>
+              </div>
+            </fieldset>
+
+            <fieldset>
+              <legend>Ship &amp; session</legend>
+              <div class="field-row">
+                <label class="field">
+                  <span>Cargo <em>m³</em></span>
+                  <input id="cargo-m3" type="number" min="0" step="0.001" value="62500" required>
+                  <small>0 is valid for route-only use with required systems or a finish.</small>
+                </label>
+                <div class="field">
+                  <span>Collateral <em>ISK</em></span>
+                  <div class="unit-input">
+                    <input id="collateral-isk" type="text" inputmode="decimal" value="1" required>
+                    <select id="collateral-unit" aria-label="Collateral unit">
+                      <option value="isk">ISK</option>
+                      <option value="k">K</option>
+                      <option value="m">M</option>
+                      <option value="b" selected>B</option>
+                    </select>
+                  </div>
+                  <small id="collateral-preview">= 1.00B ISK · suffixes like 750M also work</small>
+                </div>
+              </div>
+              <div class="field-row">
+                <div class="field">
+                  <span>Time budget <em>hours + minutes</em></span>
+                  <div class="duration-input">
+                    <label><input id="duration-hours" type="number" min="0" step="1" value="3"><b>h</b></label>
+                    <label><input id="duration-minutes" type="number" min="0" max="59" step="1" value="0"><b>m</b></label>
+                  </div>
+                </div>
+                <label class="field">
+                  <span>Collateral model</span>
+                  <select id="collateral-mode">
+                    <option value="locked" selected>Locked at start</option>
+                    <option value="rolling">Rolling at pickup</option>
+                  </select>
+                  <small id="collateral-model-help">Locked assumes every selected contract is accepted before departure.</small>
+                </label>
+              </div>
+              <label class="field full">
+                <span>Simultaneous contracts <em>optional</em></span>
+                <input id="max-simultaneous-contracts" type="number" min="0" step="1" placeholder="Unlimited">
+                <small>Limits picked but not yet delivered courier contracts. Blank is unlimited; 0 permits no courier parcel.</small>
+              </label>
+              <div class="field full security-field">
+                <span>Allowed security <em>any combination</em></span>
+                <div class="security-band-grid" role="group" aria-label="Allowed security bands">
+                  <label class="security-choice high">
+                    <input type="checkbox" name="security-band" value="high" checked>
+                    <span><strong>High</strong><small>0.5+ shown; raw ≥ 0.45</small></span>
+                  </label>
+                  <label class="security-choice low">
+                    <input type="checkbox" name="security-band" value="low">
+                    <span><strong>Low</strong><small>0.0–0.45</small></span>
+                  </label>
+                  <label class="security-choice null">
+                    <input type="checkbox" name="security-band" value="null">
+                    <span><strong>Null</strong><small>≤ 0.0</small></span>
+                  </label>
+                </div>
+                <small>CCP's route model uses the unrounded SDE value: high starts at raw 0.45. Every non-empty combination is supported; disallowed bands cannot be used even as transit.</small>
+              </div>
+              <div class="field full">
+                <span>Avoid systems <em>optional</em></span>
+                <div class="selection-box compact-selection" id="avoid-selection">
+                  <div class="chip-list" id="avoid-chips" aria-live="polite"></div>
+                  <div class="autocomplete">
+                    <input
+                      id="avoid-search"
+                      autocomplete="off"
+                      placeholder="Search and add systems…"
+                      role="combobox"
+                      aria-autocomplete="list"
+                      aria-expanded="false"
+                      aria-controls="avoid-options"
+                    >
+                    <div class="suggestion-menu hidden" id="avoid-options" role="listbox"></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="risk-card route-policy-card">
+                <label class="toggle-row">
+                  <input id="return-to-start" type="checkbox" checked>
+                  <span>
+                    <strong>Return to start</strong>
+                    <small>Loop route, enabled by default</small>
+                  </span>
+                </label>
+                <div class="field full">
+                  <span>Required route systems <em>optional</em></span>
+                  <div class="selection-box compact-selection" id="required-selection">
+                    <div class="chip-list" id="required-chips" aria-live="polite"></div>
+                    <div class="autocomplete">
+                      <input
+                        id="required-search"
+                        autocomplete="off"
+                        placeholder="Search systems the route must visit…"
+                        role="combobox"
+                        aria-autocomplete="list"
+                        aria-expanded="false"
+                        aria-controls="required-options"
+                      >
+                      <div class="suggestion-menu hidden" id="required-options" role="listbox"></div>
+                    </div>
+                  </div>
+                  <small>Every selected system must be visited at least once; CP-SAT chooses their order.</small>
+                </div>
+                <div class="field full" id="finish-system-field">
+                  <span>Finish system <em>optional when loop is off</em></span>
+                  <div class="autocomplete">
+                    <input
+                      id="finish-system"
+                      autocomplete="off"
+                      placeholder="Open route, or search a required destination"
+                      role="combobox"
+                      aria-autocomplete="list"
+                      aria-expanded="false"
+                      aria-controls="finish-options"
+                      disabled
+                    >
+                    <div class="suggestion-menu hidden" id="finish-options" role="listbox"></div>
+                  </div>
+                  <small id="finish-system-help">Loop enabled: the route must finish back at its start.</small>
+                </div>
+              </div>
+
+              <div class="risk-card">
+                <label class="toggle-row">
+                  <input id="gank-awareness" type="checkbox">
+                  <span>
+                    <strong>Gate threat awareness</strong>
+                    <small>Optional zKill killmail evidence</small>
+                  </span>
+                </label>
+                <div class="risk-settings hidden" id="gank-settings">
+                  <div class="risk-category-grid" role="group" aria-label="Threat categories">
+                    <label><input type="checkbox" name="threat-category" value="suicide_gank" checked><span>Suicide gank</span></label>
+                    <label><input type="checkbox" name="threat-category" value="smartbomb" checked><span>Smartbomb</span></label>
+                    <label><input type="checkbox" name="threat-category" value="heavy_interdictor" checked><span>HIC / tackle</span></label>
+                    <label><input type="checkbox" name="threat-category" value="carrier" checked><span>Carrier</span></label>
+                    <label><input type="checkbox" name="threat-category" value="gate_camp" checked><span>Multi-pilot camp</span></label>
+                    <label><input type="checkbox" name="threat-category" value="hauler_loss" checked><span>Hauler loss</span></label>
+                    <label class="broad-risk"><input type="checkbox" name="threat-category" value="any_gate_pvp"><span>Any gate PvP</span></label>
+                  </div>
+                  <div class="field-row risk-numbers">
+                    <label class="field">
+                      <span>Avoid after <em>events</em></span>
+                      <input id="threat-min-events" type="number" min="1" step="1" value="1">
+                    </label>
+                    <label class="field">
+                      <span>Lookback <em>hours</em></span>
+                      <select id="threat-window-hours">
+                        <option value="1">1 hour · very fresh</option>
+                        <option value="2" selected>2 hours · recommended</option>
+                        <option value="4">4 hours</option>
+                        <option value="6">6 hours</option>
+                        <option value="12">12 hours</option>
+                        <option value="24">24 hours</option>
+                        <option value="72">3 days</option>
+                        <option value="168">7 days</option>
+                      </select>
+                    </label>
+                    <label class="field">
+                      <span>Gate radius <em>km</em></span>
+                      <input id="threat-gate-radius-km" type="number" min="0" step="10" value="250">
+                    </label>
+                  </div>
+                  <p id="risk-data-status">Enable this option, then scan to capture zKill evidence.</p>
+                </div>
+                <p class="risk-disclaimer">
+                  Pure NPC/CONCORD losses are excluded. A loss counts only when zKill identifies its
+                  location as a gate or the victim position lies inside the selected SDE gate radius.
+                  Coverage and any 1,000-mail truncation are recorded with the proof.
+                </p>
+              </div>
+            </fieldset>
+
+            <details class="advanced">
+              <summary>Advanced model &amp; solver</summary>
+              <div class="advanced-body">
+                <div class="field-row">
+                  <label class="field">
+                    <span>Seconds / jump</span>
+                    <input id="seconds-per-jump" type="number" min="1" step="1" value="60">
+                  </label>
+                  <label class="field">
+                    <span>Service seconds</span>
+                    <input id="service-seconds" type="number" min="0" step="1" value="30">
+                  </label>
+                </div>
+                <div class="field-row">
+                  <label class="field">
+                    <span>Proof search</span>
+                    <select id="time-limit">
+                      <option value="30">30 seconds</option>
+                      <option value="60" selected>1 minute · recommended</option>
+                      <option value="120">2 minutes</option>
+                      <option value="300">5 minutes</option>
+                      <option value="600">10 minutes</option>
+                    </select>
+                    <small>Full-route search limit. Dense cases may first spend up to 20 seconds on master-guided proof search.</small>
+                  </label>
+                  <label class="field">
+                    <span>Solver workers</span>
+                    <select id="workers">
+                      <option value="1">1 · deterministic</option>
+                      <option value="2">2</option>
+                      <option value="4" selected>4 · balanced default</option>
+                      <option value="8">8 · larger CPUs</option>
+                    </select>
+                  </label>
+                </div>
+                <label class="field full candidate-cap">
+                  <span>Candidate cap <em>leave blank for global proof scope</em></span>
+                  <input id="max-candidates" type="number" min="1" step="1" placeholder="No cap">
+                  <small>A cap is heuristic. Any proof will be explicitly limited to the retained candidates.</small>
+                </label>
+              </div>
+            </details>
+
+            <div class="action-stack">
+              <button class="button secondary" id="scan-button" type="button">
+                <span class="button-index">01</span> Scan public contracts
+              </button>
+              <button class="button secondary" id="rank-button" type="button" disabled>
+                <span class="button-index">02</span> Rank opportunities
+              </button>
+              <button class="button primary" id="solve-button" type="button" disabled>
+                <span class="button-index">03</span> Optimize &amp; prove
+              </button>
+            </div>
+          </form>
+        </aside>
+
+        <section class="results" aria-label="Optimization results">
+          <div id="notice" class="notice info" role="status" aria-live="polite">
+            <span class="notice-icon" aria-hidden="true">i</span>
+            <div><strong>Ready.</strong> Start by scanning one or more regions.</div>
+          </div>
+
+          <div class="metrics-grid">
+            <article class="metric panel">
+              <span class="metric-label">Contracts observed</span>
+              <strong class="metric-value" id="metric-observed">--</strong>
+              <small id="metric-scope">Scan a region to establish scope</small>
+            </article>
+            <article class="metric panel reward-metric">
+              <span class="metric-label">Planned reward</span>
+              <strong class="metric-value" id="metric-reward">--</strong>
+              <small id="metric-selected">No route solved yet</small>
+            </article>
+            <article class="metric panel">
+              <span class="metric-label">Route duration</span>
+              <strong class="metric-value" id="metric-duration">--</strong>
+              <small id="metric-route">Modelled from your timing inputs</small>
+            </article>
+          </div>
+
+          <article class="proof-card panel" id="proof-card">
+            <div class="panel-heading proof-heading">
+              <div>
+                <p class="eyebrow">OPTIMALITY CERTIFICATE</p>
+                <h2>Proof status</h2>
+              </div>
+              <span class="proof-badge neutral" id="proof-badge">Not solved</span>
+            </div>
+            <div class="proof-empty" id="proof-empty">
+              <div class="proof-orbit" aria-hidden="true"><span></span></div>
+              <p>The solver’s bound, gap, verification checks and proof scope appear here.</p>
+            </div>
+            <div class="proof-content hidden" id="proof-content">
+              <div class="proof-numbers">
+                <div><span>Objective</span><strong id="proof-objective">--</strong></div>
+                <div><span>Best bound</span><strong id="proof-bound">--</strong></div>
+                <div><span>Relative gap</span><strong id="proof-gap">--</strong></div>
+                <div><span>Wall time</span><strong id="proof-time">--</strong></div>
+              </div>
+              <div class="proof-checks">
+                <span id="proof-scope-check">○ Full eligible scope</span>
+                <span id="proof-feasible-check">○ Independent feasibility simulation</span>
+                <span id="proof-reference-check">○ Independent small-case reference</span>
+                <span id="proof-bound-strength-check">○ Bound strengthening</span>
+              </div>
+              <p class="proof-claim" id="proof-claim"></p>
+              <p class="model-note">
+                Optimality is relative to the scanned public snapshot, declared policies and deterministic
+                travel/service-time model. It is not a guarantee about future market changes or real travel time.
+              </p>
+            </div>
+          </article>
+
+          <article class="panel route-card">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">RECOMMENDED SEQUENCE</p>
+                <h2>Route manifest</h2>
+              </div>
+              <div class="table-tools">
+                <a class="text-link disabled" id="download-plan" href="/download/plan.json">Plan JSON ↓</a>
+              </div>
+            </div>
+            <div class="empty-state" id="route-empty">
+              <span class="empty-mark" aria-hidden="true">↝</span>
+              <strong>No route yet</strong>
+              <p>Optimize a scanned snapshot to build the pickup and delivery sequence.</p>
+            </div>
+            <div class="table-scroll hidden" id="route-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Action</th>
+                    <th>Contract</th>
+                    <th>System</th>
+                    <th>Jumps</th>
+                    <th>Cargo after</th>
+                    <th>Collateral after</th>
+                    <th>Reward earned</th>
+                    <th class="execution-column hidden">Live action</th>
+                  </tr>
+                </thead>
+                <tbody id="route-body"></tbody>
+              </table>
+            </div>
+            <section class="pilot-route hidden" id="pilot-route" aria-labelledby="pilot-route-title">
+              <div class="pilot-route-heading">
+                <div>
+                  <p class="eyebrow">PILOT DIRECTIONS</p>
+                  <h3 id="pilot-route-title">Gate-by-gate itinerary</h3>
+                </div>
+                <span class="route-policy-badge" id="route-policy-badge">Policy-routed</span>
+              </div>
+              <p class="pilot-route-note" id="pilot-route-note"></p>
+              <div class="pilot-legs" id="pilot-legs"></div>
+            </section>
+          </article>
+
+          <article class="panel execution-card hidden" id="execution-card">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">LIVE RUN</p>
+                <h2>Execution &amp; replanning</h2>
+              </div>
+              <span class="pill" id="execution-state-pill">Plan ready</span>
+            </div>
+            <div class="execution-stats" id="execution-stats">
+              <div><span>Current system</span><strong id="exec-system">--</strong></div>
+              <div><span>Active commitments</span><strong id="exec-active">0</strong></div>
+              <div><span>Cargo in use</span><strong id="exec-cargo">0 m³</strong></div>
+              <div><span>Locked collateral</span><strong id="exec-collateral">0 ISK</strong></div>
+            </div>
+            <div class="commit-box" id="commit-box">
+              <label class="confirm-row" id="locked-confirm-row">
+                <input id="locked-confirm" type="checkbox">
+                <span>
+                  <strong>I accepted every selected contract in EVE.</strong>
+                  Locked mode assumes their collateral is committed immediately.
+                </span>
+              </label>
+              <button class="button primary compact" id="start-execution" type="button">
+                Arm this plan for execution
+              </button>
+            </div>
+            <div class="live-tools hidden" id="live-tools">
+              <p id="execution-guidance">
+                Record pickups, deliveries, and required route milestones as they actually happen. The next
+                replan keeps every accepted shipment and trip target mandatory.
+              </p>
+              <div class="live-actions">
+                <button class="button secondary compact" id="replan-button" type="button">
+                  Refresh market &amp; replan
+                </button>
+                <a class="text-link" id="download-state" href="/download/execution.json">Execution JSON ↓</a>
+                <button class="text-button danger" id="reset-execution" type="button">Reset live session</button>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel opportunities-card">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">SINGLE-CONTRACT BASELINE</p>
+                <h2>Opportunity ranking</h2>
+              </div>
+              <span class="pill" id="rank-count">Not ranked</span>
+            </div>
+            <p class="section-help">
+              Useful for inspection only. The exact solver can interleave pickups and deliveries and is not
+              restricted to this single-contract ordering.
+            </p>
+            <div class="empty-state compact-empty" id="rank-empty">
+              <strong>No ranking yet</strong>
+              <p>Scan, then rank with the same limits you plan to solve.</p>
+            </div>
+            <div class="table-scroll hidden" id="rank-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Contract</th>
+                    <th>Lane</th>
+                    <th>Reward</th>
+                    <th>Volume</th>
+                    <th>Collateral</th>
+                    <th>Solo jumps</th>
+                    <th>ISK / hour</th>
+                    <th>Reward / collateral</th>
+                  </tr>
+                </thead>
+                <tbody id="rank-body"></tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+      </div>
+    </main>
+
+    <footer>
+      <span>EVE Courier Route Optimizer · runs on your machine</span>
+      <span>Uses public ESI + bundled SDE route data · not affiliated with CCP Games</span>
+    </footer>
+
+    <div class="busy-layer hidden" id="busy-layer" role="alert" aria-live="assertive">
+      <div class="busy-card">
+        <span class="spinner" aria-hidden="true"></span>
+        <div>
+          <strong id="busy-title">Working…</strong>
+          <small id="busy-detail"></small>
+          <small id="busy-elapsed"></small>
+        </div>
+      </div>
+    </div>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>

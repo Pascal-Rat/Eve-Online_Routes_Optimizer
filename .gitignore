@@ -1,0 +1,18 @@
+.venv/
+.cache/
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Runtime artifacts may contain current route/contract information.
+contracts*.json
+plan*.json
+execution*.json
+replan*.json
+*.sqlite3-journal
