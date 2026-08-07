@@ -1,0 +1,23 @@
+name: Feature request
+description: Propose a feature or proof/performance improvement.
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What operator or contributor problem would this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Proof or safety implications
+      description: If this touches preprocessing, routing, constraints, or bounds, explain how exactness should be preserved.
