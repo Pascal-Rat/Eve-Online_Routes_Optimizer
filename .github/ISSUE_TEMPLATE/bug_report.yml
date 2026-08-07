@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a reproducible problem in the optimizer, web UI, or data pipeline.
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve the optimizer. Remove contract IDs or route details you do not want to make public.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: "1.4.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Local web UI
+        - Solver or proof certificate
+        - ESI contract scan
+        - zKill threat awareness
+        - SDE or routing
+        - Live execution or replanning
+        - CLI
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include the smallest safe configuration or frozen fixture that reproduces the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: certificate
+    attributes:
+      label: Certificate or log excerpt
+      description: Optional. Do not paste secrets, tokens, or private contract information.
