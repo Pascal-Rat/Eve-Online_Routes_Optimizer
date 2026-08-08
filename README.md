@@ -1,6 +1,6 @@
 # EVE Courier Route Optimizer
 
-[![CI](https://github.com/Bolde-Swoup/Eve-Courrier-Route-Optimizer/actions/workflows/ci.yml/badge.svg)](https://github.com/Bolde-Swoup/Eve-Courrier-Route-Optimizer/actions/workflows/ci.yml)
+[![CI](https://github.com/Pascal-Rat/eve-courier-route-optimizer/actions/workflows/ci.yml/badge.svg)](https://github.com/Pascal-Rat/eve-courier-route-optimizer/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-2ea44f.svg)](LICENSE)
 
@@ -42,8 +42,8 @@ Requirements are Python 3.12+ and internet access for live ESI/zKill scans. The 
 contains the distilled routing SDE, so normal installation does not download CCP's full SDE.
 
 ```bash
-git clone https://github.com/Bolde-Swoup/Eve-Courrier-Route-Optimizer.git
-cd Eve-Courrier-Route-Optimizer
+git clone https://github.com/Pascal-Rat/eve-courier-route-optimizer.git
+cd eve-courier-route-optimizer
 
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -e .
