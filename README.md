@@ -1,4 +1,4 @@
-# EVE Courier Route Optimizer
+# EVE Online Courier Route Optimizer
 
 [![CI](https://github.com/Pascal-Rat/eve-courier-route-optimizer/actions/workflows/ci.yml/badge.svg)](https://github.com/Pascal-Rat/eve-courier-route-optimizer/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
