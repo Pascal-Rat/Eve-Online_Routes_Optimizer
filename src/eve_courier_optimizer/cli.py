@@ -144,7 +144,9 @@ def _security_policy(
     arguments: argparse.Namespace,
     snapshot: ContractSnapshot,
 ) -> SecurityPolicy:
-    combinations = {
+    """Translate CLI security and threat options into one auditable route policy."""
+
+    allowed_bands_by_option = {
         "highsec": frozenset({SecurityBand.HIGH}),
         "lowsec": frozenset({SecurityBand.LOW}),
         "nullsec": frozenset({SecurityBand.NULL}),
@@ -153,30 +155,32 @@ def _security_policy(
         "low+null": frozenset({SecurityBand.LOW, SecurityBand.NULL}),
         "any": frozenset(SecurityBand),
     }
-    avoided = frozenset(_resolve_system(graph, item) for item in arguments.avoid_system)
-    threshold = arguments.gank_ship_kill_threshold
-    activity_time = None
-    gank_avoids: frozenset[int] = frozenset()
+    manually_avoided_system_ids = frozenset(
+        _resolve_system(graph, item) for item in arguments.avoid_system
+    )
+    gank_ship_kill_threshold = arguments.gank_ship_kill_threshold
+    gank_activity_fetched_at = None
+    gank_avoided_system_ids: frozenset[int] = frozenset()
     start_system_id = _resolve_system(graph, arguments.start)
-    if threshold is not None:
+    if gank_ship_kill_threshold is not None:
         if snapshot.system_kills_fetched_at is None:
             raise ValueError(
                 "gank awareness needs system-kill activity; create a fresh snapshot with scan"
             )
-        gank_avoids = frozenset(
+        gank_avoided_system_ids = frozenset(
             item.system_id
             for item in snapshot.system_kill_activity
-            if item.ship_kills >= threshold and item.system_id != start_system_id
+            if item.ship_kills >= gank_ship_kill_threshold and item.system_id != start_system_id
         )
-        activity_time = snapshot.system_kills_fetched_at
+        gank_activity_fetched_at = snapshot.system_kills_fetched_at
     threat_categories = frozenset(ThreatCategory(item) for item in arguments.avoid_threat)
-    threat_avoids: frozenset[int] = frozenset()
+    threat_avoided_system_ids: frozenset[int] = frozenset()
     if threat_categories:
         if snapshot.threat_intel_fetched_at is None:
             raise ValueError(
                 "gate-threat awareness needs zKill intel; scan with --threat-intel first"
             )
-        threat_avoids = threat_avoided_systems(
+        threat_avoided_system_ids = threat_avoided_systems(
             snapshot.gate_threat_events,
             threat_categories,
             minimum_events=arguments.threat_min_events,
@@ -184,28 +188,22 @@ def _security_policy(
         )
     return SecurityPolicy(
         minimum_security=None,
-        avoided_system_ids=avoided,
-        allowed_bands=combinations[arguments.security],
-        gank_avoided_system_ids=gank_avoids,
-        gank_ship_kill_threshold=threshold,
-        gank_activity_fetched_at=activity_time,
-        threat_avoided_system_ids=threat_avoids,
+        avoided_system_ids=manually_avoided_system_ids,
+        allowed_bands=allowed_bands_by_option[arguments.security],
+        gank_avoided_system_ids=gank_avoided_system_ids,
+        gank_ship_kill_threshold=gank_ship_kill_threshold,
+        gank_activity_fetched_at=gank_activity_fetched_at,
+        threat_avoided_system_ids=threat_avoided_system_ids,
         threat_categories=threat_categories,
         threat_min_events=arguments.threat_min_events if threat_categories else None,
-        threat_intel_fetched_at=(
-            snapshot.threat_intel_fetched_at if threat_categories else None
-        ),
+        threat_intel_fetched_at=(snapshot.threat_intel_fetched_at if threat_categories else None),
         threat_window_seconds=snapshot.threat_window_seconds if threat_categories else None,
         threat_gate_radius_m=snapshot.threat_gate_radius_m if threat_categories else None,
         threat_coverage_region_ids=(
-            frozenset(snapshot.threat_coverage_region_ids)
-            if threat_categories
-            else frozenset()
+            frozenset(snapshot.threat_coverage_region_ids) if threat_categories else frozenset()
         ),
         threat_incomplete_region_ids=(
-            frozenset(snapshot.threat_incomplete_region_ids)
-            if threat_categories
-            else frozenset()
+            frozenset(snapshot.threat_incomplete_region_ids) if threat_categories else frozenset()
         ),
     )
 

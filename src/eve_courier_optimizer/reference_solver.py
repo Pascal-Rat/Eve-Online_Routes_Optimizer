@@ -18,9 +18,11 @@ class ReferenceResult:
 def solve_reference(prepared: PreparedProblem, *, contract_limit: int = 12) -> ReferenceResult:
     """Exhaustively solve a small locked-collateral instance.
 
-    State is ``(current_system, ever_picked_mask, delivered_mask)``. For identical state, an
-    earlier arrival dominates every later arrival because all remaining constraints are upper
-    time bounds. Enumerating every non-dominated transition therefore proves the optimum.
+    This intentionally simple implementation is independent of OR-Tools. It stores one bit per
+    contract in two integers: a set of contracts ever picked up and a set already delivered. For
+    an identical ``(system, picked set, delivered set)``, an earlier arrival is always at least as
+    useful as a later one because every remaining time constraint is an upper bound. Exploring
+    every earliest-arrival state therefore proves the optimum for these small instances.
     """
 
     problem = prepared.problem
@@ -35,101 +37,165 @@ def solve_reference(prepared: PreparedProblem, *, contract_limit: int = 12) -> R
     if len(contracts) > contract_limit:
         raise ValueError(f"reference solver limit is {contract_limit} contracts")
 
-    n = len(contracts)
-    volume = [item.contract.volume_units for item in contracts]
-    collateral = [item.contract.collateral_units for item in contracts]
-    reward = [item.contract.reward_units for item in contracts]
-    deadlines = [item.contract.days_to_complete * 86_400 for item in contracts]
-    full_mask = (1 << n) - 1
-
-    def sum_mask(values: list[int], mask: int) -> int:
-        return sum(values[index] for index in range(n) if mask & (1 << index))
-
-    # Heap fields: elapsed, tie_breaker, system, picked, delivered.
-    serial = 0
-    heap: list[tuple[int, int, int, int, int]] = [
-        (0, serial, constraints.start_system_id, 0, 0)
+    contract_count = len(contracts)
+    cargo_volume_by_index = [contract.contract.volume_units for contract in contracts]
+    collateral_by_index = [contract.contract.collateral_units for contract in contracts]
+    reward_by_index = [contract.contract.reward_units for contract in contracts]
+    deadline_seconds_by_index = [
+        contract.contract.days_to_complete * 86_400 for contract in contracts
     ]
-    best_time: dict[tuple[int, int, int], int] = {
+    all_contracts_mask = (1 << contract_count) - 1
+
+    def sum_selected_values(values: list[int], selection_mask: int) -> int:
+        return sum(
+            values[contract_index]
+            for contract_index in range(contract_count)
+            if selection_mask & (1 << contract_index)
+        )
+
+    # Queue fields: elapsed seconds, stable tie-breaker, system, picked mask, delivered mask.
+    next_queue_order = 0
+    states_to_explore: list[tuple[int, int, int, int, int]] = [
+        (0, next_queue_order, constraints.start_system_id, 0, 0)
+    ]
+    earliest_arrival_by_state: dict[tuple[int, int, int], int] = {
         (constraints.start_system_id, 0, 0): 0
     }
-    best_reward = 0
-    explored = 0
+    best_reward_units = 0
+    explored_state_count = 0
 
-    def can_finish(current_system: int, elapsed: int) -> bool:
-        terminal = constraints.terminal_system_id
-        if terminal is None:
+    def can_reach_required_finish(
+        current_system_id: int,
+        elapsed_seconds: int,
+    ) -> bool:
+        terminal_system_id = constraints.terminal_system_id
+        if terminal_system_id is None:
             return True
-        jumps = prepared.jump_matrix.get((current_system, terminal))
+        jump_count = prepared.jump_matrix.get((current_system_id, terminal_system_id))
         return (
-            jumps is not None
-            and elapsed + jumps * constraints.travel.seconds_per_jump
+            jump_count is not None
+            and elapsed_seconds + jump_count * constraints.travel.seconds_per_jump
             <= constraints.horizon_seconds
         )
 
-    while heap:
-        elapsed, _, current_system, picked, delivered = heapq.heappop(heap)
-        key = (current_system, picked, delivered)
-        if best_time.get(key) != elapsed:
+    while states_to_explore:
+        (
+            elapsed_seconds,
+            _,
+            current_system_id,
+            picked_contracts_mask,
+            delivered_contracts_mask,
+        ) = heapq.heappop(states_to_explore)
+        state_key = (
+            current_system_id,
+            picked_contracts_mask,
+            delivered_contracts_mask,
+        )
+        if earliest_arrival_by_state.get(state_key) != elapsed_seconds:
             continue
-        explored += 1
-        if picked == delivered and can_finish(current_system, elapsed):
-            best_reward = max(best_reward, sum_mask(reward, delivered))
+        explored_state_count += 1
+        if picked_contracts_mask == delivered_contracts_mask and can_reach_required_finish(
+            current_system_id, elapsed_seconds
+        ):
+            best_reward_units = max(
+                best_reward_units,
+                sum_selected_values(reward_by_index, delivered_contracts_mask),
+            )
 
-        active_mask = picked & ~delivered
-        cargo = sum_mask(volume, active_mask)
-        locked_collateral = sum_mask(collateral, picked)
+        carried_contracts_mask = picked_contracts_mask & ~delivered_contracts_mask
+        cargo_load_units = sum_selected_values(cargo_volume_by_index, carried_contracts_mask)
+        locked_collateral_units = sum_selected_values(collateral_by_index, picked_contracts_mask)
 
-        unpicked = full_mask & ~picked
-        for index in range(n):
-            bit = 1 << index
-            if not (unpicked & bit):
+        unpicked_contracts_mask = all_contracts_mask & ~picked_contracts_mask
+        for contract_index in range(contract_count):
+            contract_bit = 1 << contract_index
+            if not (unpicked_contracts_mask & contract_bit):
                 continue
             if (
                 constraints.max_simultaneous_contracts is not None
-                and active_mask.bit_count() >= constraints.max_simultaneous_contracts
+                and carried_contracts_mask.bit_count() >= constraints.max_simultaneous_contracts
             ):
                 continue
-            if cargo + volume[index] > constraints.cargo_capacity_units:
+            if (
+                cargo_load_units + cargo_volume_by_index[contract_index]
+                > constraints.cargo_capacity_units
+            ):
                 continue
-            if locked_collateral + collateral[index] > constraints.collateral_budget_units:
+            if (
+                locked_collateral_units + collateral_by_index[contract_index]
+                > constraints.collateral_budget_units
+            ):
                 continue
-            target = contracts[index].origin_system_id
-            jumps = prepared.jump_matrix.get((current_system, target))
-            if jumps is None:
+            pickup_system_id = contracts[contract_index].origin_system_id
+            jump_count = prepared.jump_matrix.get((current_system_id, pickup_system_id))
+            if jump_count is None:
                 continue
-            next_time = (
-                elapsed
-                + jumps * constraints.travel.seconds_per_jump
+            pickup_completion_seconds = (
+                elapsed_seconds
+                + jump_count * constraints.travel.seconds_per_jump
                 + constraints.travel.service_seconds
             )
-            if next_time > constraints.horizon_seconds:
+            if pickup_completion_seconds > constraints.horizon_seconds:
                 continue
-            next_key = (target, picked | bit, delivered)
-            if next_time < best_time.get(next_key, 2**63 - 1):
-                best_time[next_key] = next_time
-                serial += 1
-                heapq.heappush(heap, (next_time, serial, target, picked | bit, delivered))
+            next_state_key = (
+                pickup_system_id,
+                picked_contracts_mask | contract_bit,
+                delivered_contracts_mask,
+            )
+            if pickup_completion_seconds < earliest_arrival_by_state.get(next_state_key, 2**63 - 1):
+                earliest_arrival_by_state[next_state_key] = pickup_completion_seconds
+                next_queue_order += 1
+                heapq.heappush(
+                    states_to_explore,
+                    (
+                        pickup_completion_seconds,
+                        next_queue_order,
+                        pickup_system_id,
+                        picked_contracts_mask | contract_bit,
+                        delivered_contracts_mask,
+                    ),
+                )
 
-        for index in range(n):
-            bit = 1 << index
-            if not (active_mask & bit):
+        for contract_index in range(contract_count):
+            contract_bit = 1 << contract_index
+            if not (carried_contracts_mask & contract_bit):
                 continue
-            target = contracts[index].destination_system_id
-            jumps = prepared.jump_matrix.get((current_system, target))
-            if jumps is None:
+            delivery_system_id = contracts[contract_index].destination_system_id
+            jump_count = prepared.jump_matrix.get((current_system_id, delivery_system_id))
+            if jump_count is None:
                 continue
-            next_time = (
-                elapsed
-                + jumps * constraints.travel.seconds_per_jump
+            delivery_completion_seconds = (
+                elapsed_seconds
+                + jump_count * constraints.travel.seconds_per_jump
                 + constraints.travel.service_seconds
             )
-            if next_time > constraints.horizon_seconds or next_time > deadlines[index]:
+            if (
+                delivery_completion_seconds > constraints.horizon_seconds
+                or delivery_completion_seconds > deadline_seconds_by_index[contract_index]
+            ):
                 continue
-            next_key = (target, picked, delivered | bit)
-            if next_time < best_time.get(next_key, 2**63 - 1):
-                best_time[next_key] = next_time
-                serial += 1
-                heapq.heappush(heap, (next_time, serial, target, picked, delivered | bit))
+            next_state_key = (
+                delivery_system_id,
+                picked_contracts_mask,
+                delivered_contracts_mask | contract_bit,
+            )
+            if delivery_completion_seconds < earliest_arrival_by_state.get(
+                next_state_key, 2**63 - 1
+            ):
+                earliest_arrival_by_state[next_state_key] = delivery_completion_seconds
+                next_queue_order += 1
+                heapq.heappush(
+                    states_to_explore,
+                    (
+                        delivery_completion_seconds,
+                        next_queue_order,
+                        delivery_system_id,
+                        picked_contracts_mask,
+                        delivered_contracts_mask | contract_bit,
+                    ),
+                )
 
-    return ReferenceResult(objective_units=best_reward, explored_states=explored)
+    return ReferenceResult(
+        objective_units=best_reward_units,
+        explored_states=explored_state_count,
+    )
