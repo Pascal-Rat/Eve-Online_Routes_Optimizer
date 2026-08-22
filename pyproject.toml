@@ -31,7 +31,7 @@ Issues = "https://github.com/Pascal-Rat/Eve-Online_Routes_Optimizer/issues"
 [project.optional-dependencies]
 dev = [
     "mypy>=1.15,<2",
-    "pytest>=8.3,<9",
+    "pytest>=8.3,<10",
     "pytest-cov>=6,<8",
     "ruff>=0.11,<1",
 ]
