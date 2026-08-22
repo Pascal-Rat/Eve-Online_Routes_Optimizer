@@ -37,8 +37,8 @@ class SystemRelaxationMaster:
     """Reusable endpoint-system master model for proof-guided decomposition."""
 
     model: cp_model.CpModel
-    selected: dict[int, cp_model.IntVar]
-    total_reward: cp_model.IntVar
+    contract_is_selected: dict[int, cp_model.IntVar]
+    total_reward_units: cp_model.IntVar
     routed_systems: int
 
 
@@ -75,27 +75,29 @@ def _mandatory_action_count(prepared: PreparedProblem) -> int:
     return sum(1 if shipment.picked else 2 for shipment in prepared.problem.active_shipments)
 
 
-def _relaxation_systems(prepared: PreparedProblem) -> tuple[set[int], set[int]]:
+def _collect_relaxation_system_ids(
+    prepared: PreparedProblem,
+) -> tuple[set[int], set[int]]:
     """Return all endpoint systems and the subset that a real route must visit."""
 
     problem = prepared.problem
     constraints = problem.constraints
-    systems = set(constraints.required_system_ids)
-    mandatory = set(constraints.required_system_ids)
-    for item in problem.contracts:
-        systems.add(item.origin_system_id)
-        systems.add(item.destination_system_id)
+    candidate_system_ids = set(constraints.required_system_ids)
+    mandatory_system_ids = set(constraints.required_system_ids)
+    for contract in problem.contracts:
+        candidate_system_ids.add(contract.origin_system_id)
+        candidate_system_ids.add(contract.destination_system_id)
     for shipment in problem.active_shipments:
         if not shipment.picked:
-            systems.add(shipment.contract.origin_system_id)
-            mandatory.add(shipment.contract.origin_system_id)
-        systems.add(shipment.contract.destination_system_id)
-        mandatory.add(shipment.contract.destination_system_id)
-    systems.add(constraints.start_system_id)
+            candidate_system_ids.add(shipment.contract.origin_system_id)
+            mandatory_system_ids.add(shipment.contract.origin_system_id)
+        candidate_system_ids.add(shipment.contract.destination_system_id)
+        mandatory_system_ids.add(shipment.contract.destination_system_id)
+    candidate_system_ids.add(constraints.start_system_id)
     if constraints.terminal_system_id is not None:
-        systems.add(constraints.terminal_system_id)
-        mandatory.add(constraints.terminal_system_id)
-    return systems, mandatory
+        candidate_system_ids.add(constraints.terminal_system_id)
+        mandatory_system_ids.add(constraints.terminal_system_id)
+    return candidate_system_ids, mandatory_system_ids
 
 
 def build_system_relaxation_master(
@@ -114,130 +116,163 @@ def build_system_relaxation_master(
 
     problem = prepared.problem
     constraints = problem.constraints
-    all_systems, mandatory_systems = _relaxation_systems(prepared)
-    start_system = constraints.start_system_id
-    terminal_system = constraints.terminal_system_id
-    intermediate_systems = tuple(
-        sorted(all_systems - {start_system} - ({terminal_system} if terminal_system else set()))
+    candidate_system_ids, mandatory_system_ids = _collect_relaxation_system_ids(prepared)
+    start_system_id = constraints.start_system_id
+    terminal_system_id = constraints.terminal_system_id
+    intermediate_system_ids = tuple(
+        sorted(
+            candidate_system_ids
+            - {start_system_id}
+            - ({terminal_system_id} if terminal_system_id else set())
+        )
     )
-    node_system: dict[int, int | None] = {0: start_system, 1: terminal_system}
-    node_for_system: dict[int, int] = {}
-    for node, system_id in enumerate(intermediate_systems, start=2):
-        node_system[node] = system_id
-        node_for_system[system_id] = node
+    system_id_by_node_id: dict[int, int | None] = {
+        0: start_system_id,
+        1: terminal_system_id,
+    }
+    node_id_by_system_id: dict[int, int] = {}
+    for node_id, system_id in enumerate(intermediate_system_ids, start=2):
+        system_id_by_node_id[node_id] = system_id
+        node_id_by_system_id[system_id] = node_id
 
     model = cp_model.CpModel()
-    selected = {
-        item.contract.contract_id: model.new_bool_var(f"relax_select_{item.contract.contract_id}")
-        for item in problem.contracts
+    contract_is_selected = {
+        contract.contract.contract_id: model.new_bool_var(
+            f"relax_select_{contract.contract.contract_id}"
+        )
+        for contract in problem.contracts
     }
-    cuts = selection_cuts if selection_cuts is not None else build_selection_cuts(prepared)
-    clique_pairs = {
-        tuple(sorted(pair)) for clique in cuts.cliques for pair in combinations(clique, 2)
+    effective_selection_cuts = (
+        selection_cuts if selection_cuts is not None else build_selection_cuts(prepared)
+    )
+    contract_pairs_already_covered_by_cliques = {
+        tuple(sorted(pair))
+        for clique in effective_selection_cuts.cliques
+        for pair in combinations(clique, 2)
     }
-    for clique in cuts.cliques:
-        model.add(sum(selected[contract_id] for contract_id in clique) <= 1)
-    for first, second in cuts.pairs:
-        if (first, second) not in clique_pairs:
-            model.add(selected[first] + selected[second] <= 1)
-    visit = {
+    for mutually_exclusive_contract_ids in effective_selection_cuts.cliques:
+        model.add(
+            sum(
+                contract_is_selected[contract_id] for contract_id in mutually_exclusive_contract_ids
+            )
+            <= 1
+        )
+    for first_contract_id, second_contract_id in effective_selection_cuts.pairs:
+        if (
+            first_contract_id,
+            second_contract_id,
+        ) not in contract_pairs_already_covered_by_cliques:
+            model.add(
+                contract_is_selected[first_contract_id] + contract_is_selected[second_contract_id]
+                <= 1
+            )
+    system_is_visited = {
         system_id: model.new_bool_var(f"relax_visit_{system_id}")
-        for system_id in intermediate_systems
+        for system_id in intermediate_system_ids
     }
 
-    incident: dict[int, list[cp_model.IntVar]] = {
-        system_id: [] for system_id in intermediate_systems
+    selection_literals_incident_to_system: dict[int, list[cp_model.IntVar]] = {
+        system_id: [] for system_id in intermediate_system_ids
     }
-    for item in problem.contracts:
-        literal = selected[item.contract.contract_id]
-        for system_id in {item.origin_system_id, item.destination_system_id}:
-            if system_id in visit:
-                model.add(literal <= visit[system_id])
-                incident[system_id].append(literal)
-    for system_id, literal in visit.items():
-        if system_id in mandatory_systems:
-            model.add(literal == 1)
-        elif incident[system_id]:
-            model.add(literal <= sum(incident[system_id]))
+    for contract in problem.contracts:
+        is_contract_selected = contract_is_selected[contract.contract.contract_id]
+        for system_id in {
+            contract.origin_system_id,
+            contract.destination_system_id,
+        }:
+            if system_id in system_is_visited:
+                model.add(is_contract_selected <= system_is_visited[system_id])
+                selection_literals_incident_to_system[system_id].append(is_contract_selected)
+    for system_id, is_system_visited in system_is_visited.items():
+        if system_id in mandatory_system_ids:
+            model.add(is_system_visited == 1)
+        elif selection_literals_incident_to_system[system_id]:
+            model.add(is_system_visited <= sum(selection_literals_incident_to_system[system_id]))
         else:
-            model.add(literal == 0)
+            model.add(is_system_visited == 0)
 
-    route_arcs: dict[tuple[int, int], cp_model.IntVar] = {}
-    circuit_arcs: list[tuple[int, int, cp_model.IntVar]] = []
-    wrap = model.new_bool_var("relax_end_to_start")
-    model.add(wrap == 1)
-    route_arcs[(1, 0)] = wrap
-    circuit_arcs.append((1, 0, wrap))
-    for system_id, node in node_for_system.items():
-        skip = model.new_bool_var(f"relax_skip_{system_id}")
-        model.add(skip + visit[system_id] == 1)
-        circuit_arcs.append((node, node, skip))
+    circuit_arc_definitions: list[tuple[int, int, cp_model.IntVar]] = []
+    end_to_start_arc_is_used = model.new_bool_var("relax_end_to_start")
+    model.add(end_to_start_arc_is_used == 1)
+    circuit_arc_definitions.append((1, 0, end_to_start_arc_is_used))
+    for system_id, node_id in node_id_by_system_id.items():
+        system_is_skipped = model.new_bool_var(f"relax_skip_{system_id}")
+        model.add(system_is_skipped + system_is_visited[system_id] == 1)
+        circuit_arc_definitions.append((node_id, node_id, system_is_skipped))
 
-    travel_terms: list[cp_model.LinearExpr] = []
-    nodes = tuple(sorted(node_system))
-    for from_node in nodes:
-        if from_node == 1:
+    travel_time_terms: list[cp_model.LinearExpr] = []
+    node_ids = tuple(sorted(system_id_by_node_id))
+    for source_node_id in node_ids:
+        if source_node_id == 1:
             continue
-        from_system = node_system[from_node]
-        assert from_system is not None
-        for to_node in nodes:
-            if to_node == 0 or to_node == from_node:
+        source_system_id = system_id_by_node_id[source_node_id]
+        assert source_system_id is not None
+        for destination_node_id in node_ids:
+            if destination_node_id == 0 or destination_node_id == source_node_id:
                 continue
-            to_system = node_system[to_node]
-            if to_node == 1 and to_system is None:
-                jumps = 0
-            elif to_system is None:
+            destination_system_id = system_id_by_node_id[destination_node_id]
+            if destination_node_id == 1 and destination_system_id is None:
+                jump_count = 0
+            elif destination_system_id is None:
                 continue
             else:
-                distance = prepared.jump_matrix.get((from_system, to_system))
-                if distance is None:
+                possible_jump_count = prepared.jump_matrix.get(
+                    (source_system_id, destination_system_id)
+                )
+                if possible_jump_count is None:
                     continue
-                jumps = distance
-            literal = model.new_bool_var(f"relax_arc_{from_node}_{to_node}")
-            route_arcs[(from_node, to_node)] = literal
-            circuit_arcs.append((from_node, to_node, literal))
-            seconds = jumps * constraints.travel.seconds_per_jump
-            if seconds:
-                travel_terms.append(seconds * literal)
-    model.add_circuit(circuit_arcs)
+                jump_count = possible_jump_count
+            is_arc_used = model.new_bool_var(f"relax_arc_{source_node_id}_{destination_node_id}")
+            circuit_arc_definitions.append((source_node_id, destination_node_id, is_arc_used))
+            travel_time_seconds = jump_count * constraints.travel.seconds_per_jump
+            if travel_time_seconds:
+                travel_time_terms.append(travel_time_seconds * is_arc_used)
+    model.add_circuit(circuit_arc_definitions)
 
-    selected_count = sum(selected.values())
-    service_seconds = constraints.travel.service_seconds * (
-        _mandatory_action_count(prepared) + 2 * selected_count
+    selected_contract_count = sum(contract_is_selected.values())
+    service_time_seconds = constraints.travel.service_seconds * (
+        _mandatory_action_count(prepared) + 2 * selected_contract_count
     )
-    model.add(sum(travel_terms) + service_seconds <= constraints.horizon_seconds)
+    model.add(sum(travel_time_terms) + service_time_seconds <= constraints.horizon_seconds)
 
     if constraints.collateral_mode is CollateralMode.LOCKED:
         model.add(
             _active_collateral(prepared)
             + sum(
-                item.contract.collateral_units * selected[item.contract.contract_id]
-                for item in problem.contracts
+                contract.contract.collateral_units
+                * contract_is_selected[contract.contract.contract_id]
+                for contract in problem.contracts
             )
             <= constraints.collateral_budget_units
         )
 
-    active_reward = _active_reward(prepared)
-    maximum_reward = active_reward + sum(item.contract.reward_units for item in problem.contracts)
-    total_reward = model.new_int_var(active_reward, maximum_reward, "relax_total_reward")
+    committed_reward_units = _active_reward(prepared)
+    maximum_reward_units = committed_reward_units + sum(
+        contract.contract.reward_units for contract in problem.contracts
+    )
+    total_reward_units = model.new_int_var(
+        committed_reward_units,
+        maximum_reward_units,
+        "relax_total_reward",
+    )
     model.add(
-        total_reward
-        == active_reward
+        total_reward_units
+        == committed_reward_units
         + sum(
-            item.contract.reward_units * selected[item.contract.contract_id]
-            for item in problem.contracts
+            contract.contract.reward_units * contract_is_selected[contract.contract.contract_id]
+            for contract in problem.contracts
         )
     )
-    model.maximize(total_reward)
+    model.maximize(total_reward_units)
 
     validation_error = model.validate()
     if validation_error:
         raise ValueError(f"invalid system-relaxation model: {validation_error}")
     return SystemRelaxationMaster(
         model=model,
-        selected=selected,
-        total_reward=total_reward,
-        routed_systems=len(all_systems),
+        contract_is_selected=contract_is_selected,
+        total_reward_units=total_reward_units,
+        routed_systems=len(candidate_system_ids),
     )
 
 
@@ -252,14 +287,19 @@ def add_proven_infeasible_selection_cut(
     pickup/delivery model. This function only encodes the resulting no-good inequality.
     """
 
-    normalized = tuple(sorted(set(contract_ids)))
-    if not normalized:
+    normalized_contract_ids = tuple(sorted(set(contract_ids)))
+    if not normalized_contract_ids:
         raise ValueError("an infeasible selection cut must contain at least one contract")
-    unknown = tuple(contract_id for contract_id in normalized if contract_id not in master.selected)
-    if unknown:
-        raise ValueError(f"selection cut contains unknown contract IDs: {unknown}")
+    unknown_contract_ids = tuple(
+        contract_id
+        for contract_id in normalized_contract_ids
+        if contract_id not in master.contract_is_selected
+    )
+    if unknown_contract_ids:
+        raise ValueError(f"selection cut contains unknown contract IDs: {unknown_contract_ids}")
     master.model.add(
-        sum(master.selected[contract_id] for contract_id in normalized) <= len(normalized) - 1
+        sum(master.contract_is_selected[contract_id] for contract_id in normalized_contract_ids)
+        <= len(normalized_contract_ids) - 1
     )
 
 
@@ -283,21 +323,24 @@ def solve_system_relaxation_master(
     solver.parameters.random_seed = random_seed
     status = solver.solve(master.model)
     status_name = solver.status_name(status)
-    objective: int | None = None
-    upper_bound: int | None = None
+    objective_units: int | None = None
+    upper_bound_units: int | None = None
     selected_contract_ids: tuple[int, ...] = ()
     if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        objective = int(solver.value(master.total_reward))
-        upper_bound = (
-            objective
+        objective_units = int(solver.value(master.total_reward_units))
+        upper_bound_units = (
+            objective_units
             if status == cp_model.OPTIMAL
-            else max(objective, _integer_upper_bound(solver.best_objective_bound))
+            else max(
+                objective_units,
+                _integer_upper_bound(solver.best_objective_bound),
+            )
         )
         selected_contract_ids = tuple(
             sorted(
                 contract_id
-                for contract_id, literal in master.selected.items()
-                if solver.value(literal)
+                for contract_id, is_contract_selected in master.contract_is_selected.items()
+                if solver.value(is_contract_selected)
             )
         )
     elif status == cp_model.MODEL_INVALID:
@@ -305,8 +348,8 @@ def solve_system_relaxation_master(
 
     return SystemRelaxationBound(
         status_name=status_name,
-        upper_bound_units=upper_bound,
-        objective_units=objective,
+        upper_bound_units=upper_bound_units,
+        objective_units=objective_units,
         wall_time_seconds=solver.wall_time,
         branches=solver.num_branches,
         conflicts=solver.num_conflicts,
@@ -340,8 +383,10 @@ def _pair_minimum_seconds(
     """Optimistic resource-feasible duration for servicing exactly two contracts."""
 
     constraints = prepared.problem.constraints
-    items = (first, second)
-    sequences = (
+    contracts = (first, second)
+    # Event indexes are first pickup/delivery (0/1) and second pickup/delivery (2/3). These are
+    # the six possible orders that preserve pickup-before-delivery for both contracts.
+    valid_event_orders = (
         (0, 1, 2, 3),
         (0, 2, 1, 3),
         (0, 2, 3, 1),
@@ -349,60 +394,65 @@ def _pair_minimum_seconds(
         (2, 0, 3, 1),
         (2, 0, 1, 3),
     )
-    best: int | None = None
-    for sequence in sequences:
-        current = constraints.start_system_id
-        jumps = 0
-        cargo = 0
-        parcels = 0
-        rolling_collateral = 0
-        reachable = True
-        for event in sequence:
-            item = items[event // 2]
-            pickup = event % 2 == 0
-            if pickup:
-                cargo += item.contract.volume_units
-                parcels += 1
+    minimum_route_seconds: int | None = None
+    for event_order in valid_event_orders:
+        current_system_id = constraints.start_system_id
+        total_jump_count = 0
+        cargo_load_units = 0
+        active_contract_count = 0
+        locked_collateral_units = 0
+        is_feasible = True
+        for event_index in event_order:
+            contract = contracts[event_index // 2]
+            is_pickup = event_index % 2 == 0
+            if is_pickup:
+                cargo_load_units += contract.contract.volume_units
+                active_contract_count += 1
                 if constraints.collateral_mode is CollateralMode.ROLLING:
-                    rolling_collateral += item.contract.collateral_units
-                system_id = item.origin_system_id
+                    locked_collateral_units += contract.contract.collateral_units
+                target_system_id = contract.origin_system_id
             else:
-                cargo -= item.contract.volume_units
-                parcels -= 1
+                cargo_load_units -= contract.contract.volume_units
+                active_contract_count -= 1
                 if constraints.collateral_mode is CollateralMode.ROLLING:
-                    rolling_collateral -= item.contract.collateral_units
-                system_id = item.destination_system_id
-            if cargo > constraints.cargo_capacity_units:
-                reachable = False
+                    locked_collateral_units -= contract.contract.collateral_units
+                target_system_id = contract.destination_system_id
+            if cargo_load_units > constraints.cargo_capacity_units:
+                is_feasible = False
                 break
             if (
                 constraints.max_simultaneous_contracts is not None
-                and parcels > constraints.max_simultaneous_contracts
+                and active_contract_count > constraints.max_simultaneous_contracts
             ):
-                reachable = False
+                is_feasible = False
                 break
-            if rolling_collateral > constraints.collateral_budget_units:
-                reachable = False
+            if locked_collateral_units > constraints.collateral_budget_units:
+                is_feasible = False
                 break
-            distance = prepared.jump_matrix.get((current, system_id))
-            if distance is None:
-                reachable = False
+            leg_jump_count = prepared.jump_matrix.get((current_system_id, target_system_id))
+            if leg_jump_count is None:
+                is_feasible = False
                 break
-            jumps += distance
-            current = system_id
-        terminal = constraints.terminal_system_id
-        if reachable and terminal is not None:
-            distance = prepared.jump_matrix.get((current, terminal))
-            if distance is None:
-                reachable = False
+            total_jump_count += leg_jump_count
+            current_system_id = target_system_id
+        terminal_system_id = constraints.terminal_system_id
+        if is_feasible and terminal_system_id is not None:
+            finish_jump_count = prepared.jump_matrix.get((current_system_id, terminal_system_id))
+            if finish_jump_count is None:
+                is_feasible = False
             else:
-                jumps += distance
-        if reachable:
-            seconds = (
-                jumps * constraints.travel.seconds_per_jump + 4 * constraints.travel.service_seconds
+                total_jump_count += finish_jump_count
+        if is_feasible:
+            route_time_seconds = (
+                total_jump_count * constraints.travel.seconds_per_jump
+                + 4 * constraints.travel.service_seconds
             )
-            best = seconds if best is None else min(best, seconds)
-    return best
+            minimum_route_seconds = (
+                route_time_seconds
+                if minimum_route_seconds is None
+                else min(minimum_route_seconds, route_time_seconds)
+            )
+    return minimum_route_seconds
 
 
 def _greedy_cliques(
@@ -442,29 +492,29 @@ def build_selection_cuts(prepared: PreparedProblem) -> SelectionCuts:
 
     problem = prepared.problem
     constraints = problem.constraints
-    contract_ids = tuple(item.contract.contract_id for item in problem.contracts)
-    by_id = {item.contract.contract_id: item for item in problem.contracts}
-    active_collateral = _active_collateral(prepared)
-    pairs: list[tuple[int, int]] = []
+    contract_ids = tuple(contract.contract.contract_id for contract in problem.contracts)
+    contract_by_id = {contract.contract.contract_id: contract for contract in problem.contracts}
+    active_collateral_units = _active_collateral(prepared)
+    incompatible_contract_pairs: list[tuple[int, int]] = []
     for first_id, second_id in combinations(contract_ids, 2):
         collateral_conflict = False
         if constraints.collateral_mode is CollateralMode.LOCKED:
             collateral_conflict = (
-                active_collateral
-                + by_id[first_id].contract.collateral_units
-                + by_id[second_id].contract.collateral_units
+                active_collateral_units
+                + contract_by_id[first_id].contract.collateral_units
+                + contract_by_id[second_id].contract.collateral_units
                 > constraints.collateral_budget_units
             )
         minimum_seconds = _pair_minimum_seconds(
             prepared,
-            by_id[first_id],
-            by_id[second_id],
+            contract_by_id[first_id],
+            contract_by_id[second_id],
         )
         time_conflict = minimum_seconds is None or minimum_seconds > constraints.horizon_seconds
         if collateral_conflict or time_conflict:
-            pairs.append((first_id, second_id))
-    pair_tuple = tuple(pairs)
+            incompatible_contract_pairs.append((first_id, second_id))
+    incompatible_pairs = tuple(incompatible_contract_pairs)
     return SelectionCuts(
-        pairs=pair_tuple,
-        cliques=_greedy_cliques(contract_ids, pair_tuple),
+        pairs=incompatible_pairs,
+        cliques=_greedy_cliques(contract_ids, incompatible_pairs),
     )

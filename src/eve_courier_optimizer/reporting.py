@@ -10,6 +10,8 @@ from .domain import RouteProblem, SolveResult, isk_units_to_decimal, volume_unit
 
 
 def solve_result_to_dict(result: SolveResult, problem: RouteProblem) -> dict[str, Any]:
+    """Map domain objects to the versioned, stable JSON response schema."""
+
     certificate = result.certificate
     return {
         "schema_version": 3,
@@ -169,8 +171,10 @@ def solve_result_to_dict(result: SolveResult, problem: RouteProblem) -> dict[str
 
 
 def write_solve_result(path: Path, result: SolveResult, problem: RouteProblem) -> None:
+    """Atomically write a solve result so readers never observe a partial JSON file."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    serialized = json.dumps(solve_result_to_dict(result, problem), indent=2, sort_keys=True) + "\n"
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(serialized, encoding="utf-8")
-    temporary.replace(path)
+    json_text = json.dumps(solve_result_to_dict(result, problem), indent=2, sort_keys=True) + "\n"
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(json_text, encoding="utf-8")
+    temporary_path.replace(path)

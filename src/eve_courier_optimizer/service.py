@@ -1,4 +1,4 @@
-"""Application service boundary shared by CLI today and a localhost UI later."""
+"""Application workflow shared by the command-line and local web interfaces."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from .threat_intel import DEFAULT_GATE_RADIUS_M, DEFAULT_THREAT_WINDOW_SECONDS, 
 
 
 class PlannerService:
+    """Coordinate scanning, preprocessing, solving, and in-progress replanning."""
+
     def __init__(
         self,
         graph: UniverseGraph,
@@ -36,6 +38,8 @@ class PlannerService:
         threat_region_ids: Iterable[int] | None = None,
         contract_workers: int = DEFAULT_CONTRACT_SCAN_WORKERS,
     ) -> ContractSnapshot:
+        """Fetch an immutable public-contract snapshot and optional gate-threat data."""
+
         # Keep the legacy ESI aggregate available for old policies. Gate-focused zKill collection
         # remains opt-in and is recorded in the same immutable snapshot boundary.
         return scan_public_couriers(
@@ -60,6 +64,8 @@ class PlannerService:
         excluded_contract_ids: frozenset[int] = frozenset(),
         max_candidates: int | None = None,
     ) -> PreparedProblem:
+        """Validate and safely reduce a snapshot into the exact solver input."""
+
         return prepare_problem(
             snapshot,
             self.graph,
@@ -79,14 +85,20 @@ class PlannerService:
         max_candidates: int | None = None,
         solver_config: SolverConfig | None = None,
     ) -> tuple[PreparedProblem, SolveResult]:
-        prepared = self.prepare(
+        """Prepare and solve a fresh route, returning both the auditable input and result."""
+
+        prepared_problem = self.prepare(
             snapshot,
             constraints,
             active_shipments=active_shipments,
             excluded_contract_ids=excluded_contract_ids,
             max_candidates=max_candidates,
         )
-        return prepared, solve_exact(prepared, self.graph, config=solver_config)
+        return prepared_problem, solve_exact(
+            prepared_problem,
+            self.graph,
+            config=solver_config,
+        )
 
     def replan(
         self,
@@ -96,10 +108,12 @@ class PlannerService:
         max_candidates: int | None = None,
         solver_config: SolverConfig | None = None,
     ) -> tuple[PreparedProblem, SolveResult]:
-        constraints = constraints_for_replan(state, snapshot)
+        """Solve again from live execution state while preserving accepted commitments."""
+
+        replanning_constraints = constraints_for_replan(state, snapshot)
         return self.solve(
             snapshot,
-            constraints,
+            replanning_constraints,
             active_shipments=state.active_shipments,
             excluded_contract_ids=frozenset(state.completed_contract_ids),
             max_candidates=max_candidates,

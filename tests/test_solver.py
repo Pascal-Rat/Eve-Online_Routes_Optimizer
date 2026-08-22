@@ -254,10 +254,10 @@ def test_decomposition_learns_higher_order_cargo_infeasibility(
     assert outcome.simulation is None
     assert not outcome.proven_infeasible
     assert outcome.status_name == "iteration_limit"
-    assert outcome.iterations == 1
+    assert outcome.iteration_count == 1
     assert outcome.selection_cuts.pairs == ()
-    assert len(outcome.learned_cuts) == 1
-    assert len(outcome.learned_cuts[0]) == 3
+    assert len(outcome.learned_infeasibility_cores) == 1
+    assert len(outcome.learned_infeasibility_cores[0]) == 3
 
 
 def test_active_picked_shipment_can_make_model_infeasible(
@@ -326,9 +326,7 @@ def test_independent_simulator_rejects_delivery_before_pickup(
     simulation = simulate_and_verify(
         prepared.problem,
         tiny_graph,
-        (
-            PlannedAction(action=ActionKind.DELIVERY, contract_id=1),
-        ),
+        (PlannedAction(action=ActionKind.DELIVERY, contract_id=1),),
         (1,),
     )
     assert not simulation.report.valid
