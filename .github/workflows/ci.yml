@@ -28,5 +28,25 @@ jobs:
       - run: mypy src tools tests benchmarks
       - run: pytest
       - run: PYTHONPATH=src python -m benchmarks.run_frozen --time-limit 10
+      - run: PYTHONPATH=src python -m benchmarks.run_empire --time-limit 60
       - name: Verify wheel build
         run: python -m pip wheel . --no-deps -w dist
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e ".[dev,browser]"
+      - run: python -m playwright install --with-deps chromium
+      - run: ruff check browser_tests
+      - run: mypy browser_tests
+      - run: pytest browser_tests --no-cov --browser chromium --tracing retain-on-failure
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-test-traces
+          path: test-results/

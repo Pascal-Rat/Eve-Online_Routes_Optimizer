@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import replace
+from datetime import datetime
 
-from .domain import ActiveShipment, PlanningConstraints, SolveResult
+from .domain import ActionKind, ActiveShipment, PlanningConstraints, SolveResult, TravelLegKind
 from .esi import EsiClient
-from .execution import ExecutionState, constraints_for_replan
+from .execution import ExecutionState, constraints_for_replan, initial_execution_state
 from .planning import PreparedProblem, prepare_problem
 from .scanner import DEFAULT_CONTRACT_SCAN_WORKERS, scan_public_couriers
 from .sde import UniverseGraph
 from .snapshot import ContractSnapshot
 from .solver import SolverConfig, solve_exact
 from .threat_intel import DEFAULT_GATE_RADIUS_M, DEFAULT_THREAT_WINDOW_SECONDS, ZkillClient
+from .verification import PlannedAction, PlannedVisit, PlannedWaypoint, simulate_and_verify
 
 
 class PlannerService:
@@ -23,10 +26,13 @@ class PlannerService:
         graph: UniverseGraph,
         esi: EsiClient,
         zkill: ZkillClient | None = None,
+        *,
+        progress: Callable[[str], None] | None = None,
     ) -> None:
         self.graph = graph
         self.esi = esi
         self.zkill = zkill
+        self.progress = progress
 
     def scan(
         self,
@@ -53,6 +59,7 @@ class PlannerService:
             threat_gate_radius_m=threat_gate_radius_m,
             threat_region_ids=threat_region_ids,
             contract_workers=contract_workers,
+            progress=self.progress,
         )
 
     def prepare(
@@ -66,6 +73,8 @@ class PlannerService:
     ) -> PreparedProblem:
         """Validate and safely reduce a snapshot into the exact solver input."""
 
+        if self.progress:
+            self.progress("Preparing contracts and permitted gate routes")
         return prepare_problem(
             snapshot,
             self.graph,
@@ -98,6 +107,7 @@ class PlannerService:
             prepared_problem,
             self.graph,
             config=solver_config,
+            progress=self.progress,
         )
 
     def replan(
@@ -107,10 +117,11 @@ class PlannerService:
         *,
         max_candidates: int | None = None,
         solver_config: SolverConfig | None = None,
+        at: datetime | None = None,
     ) -> tuple[PreparedProblem, SolveResult]:
         """Solve again from live execution state while preserving accepted commitments."""
 
-        replanning_constraints = constraints_for_replan(state, snapshot)
+        replanning_constraints = constraints_for_replan(state, snapshot, at=at)
         return self.solve(
             snapshot,
             replanning_constraints,
@@ -119,3 +130,56 @@ class PlannerService:
             max_candidates=max_candidates,
             solver_config=solver_config,
         )
+
+    def arm(
+        self,
+        prepared: PreparedProblem,
+        result: SolveResult,
+        *,
+        at: datetime,
+        previous: ExecutionState | None = None,
+    ) -> ExecutionState:
+        """Recheck the proposed itinerary at departure before accepting it as live state."""
+
+        if not result.certificate.feasibility_verified:
+            raise ValueError("the plan has no independently verified feasible route")
+        constraints = prepared.problem.constraints
+        if at.tzinfo is None or at < constraints.snapshot_time:
+            raise ValueError("departure cannot predate the plan")
+        horizon = constraints.horizon_seconds
+        if previous is not None:
+            if at > previous.session_deadline:
+                raise ValueError("planning horizon has ended; extend it and replan before arming")
+            horizon = int((previous.session_deadline - at).total_seconds())
+        selected = set(result.selected_contract_ids)
+        if any(
+            c.contract.contract_id in selected and c.contract.date_expired <= at
+            for c in prepared.problem.contracts
+        ):
+            raise ValueError("a selected listing has expired; refresh and solve before arming")
+        constraints = replace(constraints, snapshot_time=at, horizon_seconds=horizon)
+        visits: list[PlannedVisit] = []
+        for leg in result.travel_legs:
+            if leg.kind is TravelLegKind.WAYPOINT:
+                visits.append(PlannedWaypoint(leg.to_system_id))
+            elif leg.kind in {TravelLegKind.PICKUP, TravelLegKind.DELIVERY}:
+                assert leg.contract_id is not None
+                visits.append(PlannedAction(ActionKind(leg.kind.value), leg.contract_id))
+        replay = simulate_and_verify(
+            replace(prepared.problem, constraints=constraints),
+            self.graph,
+            tuple(visits),
+            result.selected_contract_ids,
+        )
+        if not replay.report.valid:
+            raise ValueError(
+                "departure revalidation failed: " + "; ".join(replay.report.violations)
+            )
+        state = initial_execution_state(
+            constraints,
+            prepared.problem.contracts,
+            prepared.problem.active_shipments,
+            result,
+            completed_contract_ids=previous.completed_contract_ids if previous else (),
+        )
+        return replace(state, session_deadline=previous.session_deadline) if previous else state

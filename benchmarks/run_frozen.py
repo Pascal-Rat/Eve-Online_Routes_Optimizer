@@ -208,6 +208,12 @@ def run_benchmark_scenarios(*, time_limit_seconds: float = 15.0) -> tuple[Benchm
     return tuple(results)
 
 
+EXPECTED_REWARDS = {
+    "dst_highsec_10b_1h_gank_aware": "250000000",
+    "br_high_low_5b_1h_gank_aware": "165000000",
+}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--time-limit", type=float, default=15.0)
@@ -228,6 +234,7 @@ def main() -> int:
         result.status is ProofStatus.PROVEN_OPTIMAL
         and result.scope_untruncated
         and result.feasibility_verified
+        and result.reward_isk == EXPECTED_REWARDS[result.name]
         for result in results
     )
     return 0 if valid else 1

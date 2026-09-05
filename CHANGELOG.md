@@ -4,6 +4,18 @@ This file is intentionally release-level rather than commit-level. Git records i
 history; this page records changes an operator should care about. GitHub Releases can reuse these
 notes when tagged versions are published.
 
+## Unreleased
+
+- Keep accepted-shipment and route-progress controls available after infeasible replans. Allow real
+  progress after the planning horizon and explicit horizon extension while preserving deadlines.
+- Use current departure time in the web planner, revalidate arming, and enforce cargo on all pickups.
+  Add explicit CLI planning-time selection while retaining reproducible snapshot replay by default.
+- Run long web operations as cancellable background jobs with progress and browser reconnection.
+- Emit strict JSON ranking scores, invalidate saved plans on rescan, and retry ESI transport failures
+  without losing successful contract scans when advisory activity is unavailable.
+- Share workflow orchestration through PlannerService, add browser recovery regressions, and enforce
+  exact frozen benchmark rewards and proofs in CI.
+
 ## 1.5.0 - 2026-08-07
 
 Proof-guided decomposition release.

@@ -48,6 +48,7 @@ class EmpireProfile:
     collateral_isk: Decimal
     security_bands: frozenset[SecurityBand]
     expected_eligible: int
+    expected_reward_isk: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +73,7 @@ PROFILES = (
         collateral_isk=Decimal("10000000000"),
         security_bands=frozenset({SecurityBand.HIGH}),
         expected_eligible=96,
+        expected_reward_isk="58000000",
     ),
     EmpireProfile(
         name="br",
@@ -79,6 +81,7 @@ PROFILES = (
         collateral_isk=Decimal("5000000000"),
         security_bands=frozenset({SecurityBand.HIGH, SecurityBand.LOW}),
         expected_eligible=48,
+        expected_reward_isk="25651527",
     ),
 )
 
@@ -211,9 +214,11 @@ def main() -> int:
             result.branches,
         )
     usable = all(
-        result.status in {ProofStatus.PROVEN_OPTIMAL, ProofStatus.FEASIBLE_NOT_PROVEN}
+        result.status is ProofStatus.PROVEN_OPTIMAL
         and result.feasibility_verified
-        for result in results
+        and result.reward_isk == profile.expected_reward_isk
+        and result.best_bound_isk == profile.expected_reward_isk
+        for profile, result in zip(profiles, results, strict=True)
     )
     return 0 if usable else 1
 

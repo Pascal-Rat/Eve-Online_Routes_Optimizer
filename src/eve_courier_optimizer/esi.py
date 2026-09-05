@@ -185,7 +185,13 @@ class EsiClient:
             headers["If-None-Match"] = cached.etag
 
         for attempt in range(self.max_retries + 1):
-            response = self.transport.get(url, headers, self.timeout_seconds)
+            try:
+                response = self.transport.get(url, headers, self.timeout_seconds)
+            except OSError as error:
+                if attempt < self.max_retries:
+                    self.sleep(float(min(2**attempt, 8)))
+                    continue
+                raise EsiError(f"ESI network request failed for {url}") from error
             if response.status == 304 and cached is not None:
                 merged_headers = _headers_from_cache(cached)
                 merged_headers.update(response.headers)
@@ -262,9 +268,7 @@ class EsiClient:
                 pass
             rows.extend(page_rows)
         contracts = [
-            contract
-            for row in rows
-            if (contract := parse_public_courier(row)) is not None
+            contract for row in rows if (contract := parse_public_courier(row)) is not None
         ]
         # Page boundaries may move during a scan; contract IDs make de-duplication deterministic.
         unique = {contract.contract_id: contract for contract in contracts}

@@ -8,6 +8,7 @@ import mimetypes
 import os
 import sys
 import webbrowser
+from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import ROUND_FLOOR, Decimal
 from http import HTTPStatus
@@ -35,23 +36,24 @@ from .domain import (
     security_band,
     volume_units_to_decimal,
 )
-from .esi import EsiClient, EsiResponseCache
+from .esi import EsiClient, EsiResponseCache, utc_now
 from .execution import (
     ExecutionState,
     execution_state_to_dict,
-    initial_execution_state,
+    extend_execution_horizon,
     read_execution_state,
     record_delivery,
     record_pickup,
     record_route_system,
     write_execution_state,
 )
-from .planning import PreparedProblem, prepare_problem, rank_single_contracts
+from .jobs import BackgroundJobs
+from .planning import PreparedProblem, rank_single_contracts
 from .reporting import solve_result_to_dict, write_solve_result
 from .sde import UniverseGraph
 from .service import PlannerService
 from .snapshot import ContractSnapshot, read_snapshot, write_snapshot
-from .solver import SolverConfig, solve_exact
+from .solver import SolverConfig
 from .threat_intel import (
     DEFAULT_THREAT_WINDOW_SECONDS,
     ZkillClient,
@@ -152,11 +154,14 @@ class LocalWebApplication:
         esi: EsiClient,
         workspace: Path,
         zkill: ZkillClient | None = None,
+        *,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         self.graph = graph
         self.esi = esi
         self.zkill = zkill
         self.service = PlannerService(graph, esi, zkill)
+        self.clock = clock
         self.workspace = workspace
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.snapshot_path = workspace / "snapshot.json"
@@ -178,8 +183,22 @@ class LocalWebApplication:
             self.execution = read_execution_state(self.execution_path)
         if self.plan_path.exists():
             raw = json.loads(self.plan_path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
+            if (
+                isinstance(raw, dict)
+                and raw.get("schema_version") == 3
+                and isinstance(raw.get("scope"), dict)
+                and self.snapshot is not None
+                and raw.get("scope", {}).get("snapshot_fetched_at")
+                == self.snapshot.fetched_at.isoformat()
+                and raw.get("scope", {}).get("sde_build_number") == self.graph.metadata.build_number
+            ):
                 self.plan_payload = self._decorate_saved_plan(cast(JsonObject, raw))
+
+    def _invalidate_plan(self) -> None:
+        self.plan_path.unlink(missing_ok=True)
+        self.prepared = None
+        self.result = None
+        self.plan_payload = None
 
     def _resolve_system(self, value: object) -> int:
         text = str(value).strip()
@@ -384,7 +403,7 @@ class LocalWebApplication:
                 )
             ),
             horizon_seconds=_duration_seconds(body),
-            snapshot_time=snapshot.fetched_at,
+            snapshot_time=max(snapshot.fetched_at, self.clock()),
             collateral_mode=mode,
             travel=TravelTimeModel(seconds_per_jump, service_seconds),
             security=SecurityPolicy(
@@ -403,9 +422,7 @@ class LocalWebApplication:
                 threat_window_seconds=(
                     snapshot.threat_window_seconds if threat_categories else None
                 ),
-                threat_gate_radius_m=(
-                    snapshot.threat_gate_radius_m if threat_categories else None
-                ),
+                threat_gate_radius_m=(snapshot.threat_gate_radius_m if threat_categories else None),
                 threat_coverage_region_ids=(
                     frozenset(snapshot.threat_coverage_region_ids)
                     if threat_categories
@@ -494,6 +511,11 @@ class LocalWebApplication:
         if self.execution is None:
             return None
         payload = execution_state_to_dict(self.execution)
+        for shipment in payload["active_shipments"]:
+            for key in ("origin", "destination"):
+                system_id = shipment[f"{key}_system_id"]
+                system_name = self.graph.systems.get(system_id)
+                shipment[f"{key}_system_name"] = system_name.name if system_name else str(system_id)
         system = self.graph.systems.get(self.execution.current_system_id)
         terminal = (
             self.graph.systems.get(self.execution.terminal_system_id)
@@ -526,6 +548,7 @@ class LocalWebApplication:
                     if system_id in self.graph.systems
                 ],
                 "can_end_safely": not self.execution.active_shipments,
+                "horizon_expired": self.clock() > self.execution.session_deadline,
             }
         )
         return payload
@@ -549,9 +572,7 @@ class LocalWebApplication:
             start = self.graph.systems.get(start_id)
             saved_model["start_system_name"] = start.name if start is not None else None
             finish_id = saved_model.get("finish_system_id")
-            finish = (
-                self.graph.systems.get(int(finish_id)) if finish_id is not None else None
-            )
+            finish = self.graph.systems.get(int(finish_id)) if finish_id is not None else None
             saved_model["finish_system_name"] = finish.name if finish is not None else None
             for ids_key, systems_key in (
                 ("avoided_system_ids", "avoided_systems"),
@@ -654,9 +675,7 @@ class LocalWebApplication:
 
     def _plan_payload(self, prepared: PreparedProblem, result: SolveResult) -> JsonObject:
         payload = solve_result_to_dict(result, prepared.problem)
-        optional = {
-            item.contract.contract_id: item.contract for item in prepared.problem.contracts
-        }
+        optional = {item.contract.contract_id: item.contract for item in prepared.problem.contracts}
         active = {
             item.contract.contract.contract_id: item.contract.contract
             for item in prepared.problem.active_shipments
@@ -691,6 +710,9 @@ class LocalWebApplication:
             "snapshot": self._snapshot_summary(),
             "plan": self.plan_payload,
             "execution": self._execution_payload(),
+            "plan_armable": self.prepared is not None
+            and self.result is not None
+            and self.result.certificate.feasibility_verified,
             "artifacts": {
                 "snapshot": self.snapshot_path.exists(),
                 "plan": self.plan_path.exists(),
@@ -723,16 +745,14 @@ class LocalWebApplication:
         return {"items": matches}
 
     def scan(self, body: JsonObject) -> JsonObject:
+        if self.execution is not None:
+            raise ValueError("an execution session already exists; use Replan")
         region_scope = str(body.get("region_scope", "selected"))
         if region_scope == "all":
             region_ids = tuple(sorted(self.graph.regions))
         elif region_scope == "security":
             region_ids = tuple(
-                sorted(
-                    self.graph.region_ids_for_security_bands(
-                        self._allowed_security_bands(body)
-                    )
-                )
+                sorted(self.graph.region_ids_for_security_bands(self._allowed_security_bands(body)))
             )
         elif region_scope == "empire":
             compatible = self.graph.region_ids_for_security_bands(
@@ -770,19 +790,18 @@ class LocalWebApplication:
                 self._threat_regions_from_scan_body(body) if include_threat else None
             ),
         )
+        self._invalidate_plan()
         write_snapshot(self.snapshot_path, snapshot)
         self.snapshot = snapshot
-        self.prepared = None
-        self.result = None
-        self.plan_payload = None
         return {"snapshot": self._snapshot_summary()}
 
     def rank(self, body: JsonObject) -> JsonObject:
+        if self.execution is not None:
+            raise ValueError("an execution session already exists; use Replan")
         snapshot = self._require_snapshot()
         constraints = self._constraints(body, snapshot)
-        prepared = prepare_problem(
+        prepared = self.service.prepare(
             snapshot,
-            self.graph,
             constraints,
             max_candidates=self._max_candidates(body),
         )
@@ -803,9 +822,21 @@ class LocalWebApplication:
                     "collateral_isk": str(isk_units_to_decimal(contract.collateral_units)),
                     "solo_jumps": score.solo_jumps,
                     "solo_seconds": score.solo_seconds,
-                    "reward_per_hour_isk": score.reward_per_hour_isk,
-                    "reward_per_jump_isk": score.reward_per_jump_isk,
-                    "reward_to_collateral": score.reward_to_collateral,
+                    "reward_per_hour_isk": (
+                        score.reward_per_hour_isk
+                        if math.isfinite(score.reward_per_hour_isk)
+                        else None
+                    ),
+                    "reward_per_jump_isk": (
+                        score.reward_per_jump_isk
+                        if math.isfinite(score.reward_per_jump_isk)
+                        else None
+                    ),
+                    "reward_to_collateral": (
+                        score.reward_to_collateral
+                        if math.isfinite(score.reward_to_collateral)
+                        else None
+                    ),
                 }
             )
         return {"scope": self._scope_payload(prepared), "items": items}
@@ -817,13 +848,12 @@ class LocalWebApplication:
                 "an execution session already exists; use Replan or reset the session first"
             )
         constraints = self._constraints(body, snapshot)
-        prepared = prepare_problem(
+        prepared, result = self.service.solve(
             snapshot,
-            self.graph,
             constraints,
             max_candidates=self._max_candidates(body),
+            solver_config=self._solver_config(body),
         )
-        result = solve_exact(prepared, self.graph, config=self._solver_config(body))
         return {"plan": self._store_plan(prepared, result)}
 
     def start_execution(self, body: JsonObject) -> JsonObject:
@@ -842,14 +872,11 @@ class LocalWebApplication:
             raise ValueError(
                 "locked mode requires confirmation that every selected contract was accepted in EVE"
             )
-        state = initial_execution_state(
-            constraints,
-            self.prepared.problem.contracts,
-            self.prepared.problem.active_shipments,
+        state = self.service.arm(
+            self.prepared,
             self.result,
-            completed_contract_ids=(
-                self.execution.completed_contract_ids if self.execution is not None else ()
-            ),
+            at=max(self.clock(), constraints.snapshot_time),
+            previous=self.execution,
         )
         write_execution_state(self.execution_path, state)
         self.execution = state
@@ -864,7 +891,7 @@ class LocalWebApplication:
             raise ValueError("start an execution session before recording an action")
         action = str(body.get("action", ""))
         raw_at = str(body.get("at", "now"))
-        at = datetime.now(UTC) if raw_at.casefold() == "now" else parse_esi_datetime(raw_at)
+        at = self.clock() if raw_at.casefold() == "now" else parse_esi_datetime(raw_at)
         if action == "route_system":
             try:
                 system_id = int(str(body.get("system_id", "")))
@@ -877,10 +904,9 @@ class LocalWebApplication:
             except ValueError as error:
                 raise ValueError("contract_id must be an integer") from error
             if action == "pickup":
-                snapshot = self._require_snapshot()
                 state = record_pickup(
                     self.execution,
-                    snapshot,
+                    self.snapshot,
                     self.graph,
                     contract_id,
                     at,
@@ -904,7 +930,13 @@ class LocalWebApplication:
             remaining_seconds = max(
                 0,
                 int(
-                    (self.execution.session_deadline - self.execution.current_time).total_seconds()
+                    (
+                        self.execution.session_deadline
+                        - max(
+                            self.clock(),
+                            self.execution.current_time,
+                        )
+                    ).total_seconds()
                 ),
             )
             threat_regions = (
@@ -921,11 +953,12 @@ class LocalWebApplication:
                 snapshot.region_ids,
                 include_threat_intel=threat_enabled,
                 threat_window_seconds=(
-                    self.execution.security.threat_window_seconds
-                    or DEFAULT_THREAT_WINDOW_SECONDS
+                    self.execution.security.threat_window_seconds or DEFAULT_THREAT_WINDOW_SECONDS
                 ),
                 threat_gate_radius_m=(
-                    self.execution.security.threat_gate_radius_m or 250_000
+                    self.execution.security.threat_gate_radius_m
+                    if self.execution.security.threat_gate_radius_m is not None
+                    else 250_000
                 ),
                 threat_region_ids=threat_regions,
             )
@@ -936,6 +969,7 @@ class LocalWebApplication:
             self.execution,
             max_candidates=self._max_candidates(body),
             solver_config=self._solver_config(body),
+            at=self.clock(),
         )
         return {
             "snapshot": self._snapshot_summary(),
@@ -946,7 +980,25 @@ class LocalWebApplication:
     def reset_execution(self) -> JsonObject:
         self.execution = None
         self.execution_path.unlink(missing_ok=True)
+        self.prepared = None
+        self.result = None
         return {"execution": None}
+
+    def extend_horizon(self, body: JsonObject) -> JsonObject:
+        if self.execution is None:
+            raise ValueError("start an execution session before extending its horizon")
+        minutes = _optional_positive_int(body.get("minutes"), "minutes")
+        if minutes is None:
+            raise ValueError("minutes is required")
+        state = extend_execution_horizon(
+            self.execution,
+            additional_seconds=minutes * 60,
+            at=max(self.clock(), self.execution.current_time),
+        )
+        write_execution_state(self.execution_path, state)
+        self.execution = state
+        self._invalidate_plan()
+        return {"execution": self._execution_payload(), "plan": None}
 
     def asset(self, name: str) -> tuple[bytes, str]:
         if name not in {"index.html", "styles.css", "app.js"}:
@@ -956,7 +1008,10 @@ class LocalWebApplication:
         return resource.read_bytes(), content_type
 
 
-def _handler_type(app: LocalWebApplication) -> type[BaseHTTPRequestHandler]:
+def _handler_type(
+    app: LocalWebApplication,
+    jobs: BackgroundJobs,
+) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = f"EveCourierLocal/{__version__}"
 
@@ -986,7 +1041,7 @@ def _handler_type(app: LocalWebApplication) -> type[BaseHTTPRequestHandler]:
             )
 
         def _send_json(self, payload: JsonObject, status: HTTPStatus = HTTPStatus.OK) -> None:
-            encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            encoded = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(encoded)))
@@ -1035,7 +1090,14 @@ def _handler_type(app: LocalWebApplication) -> type[BaseHTTPRequestHandler]:
                 return
             parsed = urlsplit(self.path)
             if parsed.path == "/api/status":
-                self._send_json(app.status())
+                job = jobs.status()
+                self._send_json({**app.status(), "job": job})
+                return
+            if parsed.path.startswith("/api/jobs/"):
+                try:
+                    self._send_json({"job": jobs.status(parsed.path.removeprefix("/api/jobs/"))})
+                except ValueError as error:
+                    self._send_error_json(HTTPStatus.NOT_FOUND, str(error))
                 return
             if parsed.path == "/api/regions":
                 query = parse_qs(parsed.query).get("q", [""])[0]
@@ -1067,6 +1129,25 @@ def _handler_type(app: LocalWebApplication) -> type[BaseHTTPRequestHandler]:
                 return
             try:
                 body = self._body()
+                if self.path == "/api/jobs":
+                    job_body = body.get("input")
+                    if not isinstance(job_body, dict):
+                        raise ValueError("job input must be an object")
+                    self._send_json(
+                        {"job": jobs.start(str(body.get("operation", "")), job_body)},
+                        HTTPStatus.ACCEPTED,
+                    )
+                    return
+                if self.path.startswith("/api/jobs/") and self.path.endswith("/cancel"):
+                    job_id = self.path.removeprefix("/api/jobs/").removesuffix("/cancel")
+                    self._send_json({"job": jobs.cancel(job_id)})
+                    return
+                if jobs.running:
+                    self._send_error_json(
+                        HTTPStatus.CONFLICT,
+                        "wait for the background job or cancel it first",
+                    )
+                    return
                 routes = {
                     "/api/scan": app.scan,
                     "/api/rank": app.rank,
@@ -1074,6 +1155,7 @@ def _handler_type(app: LocalWebApplication) -> type[BaseHTTPRequestHandler]:
                     "/api/execution/start": app.start_execution,
                     "/api/action": app.record_action,
                     "/api/replan": app.replan,
+                    "/api/execution/extend": app.extend_horizon,
                 }
                 if self.path == "/api/execution/reset":
                     payload = app.reset_execution()
@@ -1092,12 +1174,22 @@ def _handler_type(app: LocalWebApplication) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
+class LocalHTTPServer(HTTPServer):
+    def __init__(self, app: LocalWebApplication, port: int) -> None:
+        self.jobs = BackgroundJobs(app)
+        super().__init__(("127.0.0.1", port), _handler_type(app, self.jobs))
+
+    def server_close(self) -> None:
+        self.jobs.close()
+        super().server_close()
+
+
 def create_http_server(app: LocalWebApplication, *, port: int = 8765) -> HTTPServer:
     """Create, but do not run, a loopback-only server. ``port=0`` is useful in tests."""
 
     if port < 0 or port > 65_535:
         raise ValueError("port must be between 0 and 65535")
-    return HTTPServer(("127.0.0.1", port), _handler_type(app))
+    return LocalHTTPServer(app, port)
 
 
 def run_local_web_ui(

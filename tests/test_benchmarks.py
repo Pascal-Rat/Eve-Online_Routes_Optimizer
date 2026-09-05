@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from benchmarks.run_empire import FIXTURE as EMPIRE_FIXTURE
-from benchmarks.run_frozen import run_benchmark_scenarios
+from benchmarks.run_frozen import EXPECTED_REWARDS, run_benchmark_scenarios
 from eve_courier_optimizer.domain import ProofStatus
 from eve_courier_optimizer.sde import load_bundled_graph
 from eve_courier_optimizer.snapshot import read_snapshot
@@ -19,6 +19,7 @@ def test_frozen_dst_and_blockade_runner_targets_prove_global_optimality() -> Non
         assert result.feasibility_verified
         assert result.eligible_contracts > 0
         assert result.selected_contracts > 0
+        assert result.reward_isk == EXPECTED_REWARDS[result.name]
 
 
 def test_realistic_empire_fixture_has_complete_declared_scope() -> None:

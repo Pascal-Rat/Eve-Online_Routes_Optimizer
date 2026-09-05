@@ -23,24 +23,23 @@ from .domain import (
 )
 from .esi import EsiClient, EsiResponseCache, default_cache_path
 from .execution import (
-    constraints_for_replan,
-    initial_execution_state,
+    extend_execution_horizon,
     read_execution_state,
     record_delivery,
     record_pickup,
     record_route_system,
     write_execution_state,
 )
-from .planning import prepare_problem, rank_single_contracts
+from .planning import rank_single_contracts
 from .reporting import write_solve_result
 from .scanner import (
     DEFAULT_CONTRACT_SCAN_WORKERS,
     MAX_CONTRACT_SCAN_WORKERS,
-    scan_public_couriers,
 )
 from .sde import UniverseGraph, load_bundled_graph
+from .service import PlannerService
 from .snapshot import ContractSnapshot, read_snapshot, write_snapshot
-from .solver import SolverConfig, solve_exact
+from .solver import SolverConfig
 from .threat_intel import (
     DEFAULT_THREAT_WINDOW_SECONDS,
     ZkillClient,
@@ -218,7 +217,11 @@ def _constraints(
         cargo_capacity_units=cargo_capacity_to_units(arguments.cargo_m3),
         collateral_budget_units=isk_to_units(arguments.collateral_isk),
         horizon_seconds=_hours_to_seconds(arguments.hours),
-        snapshot_time=snapshot.fetched_at,
+        snapshot_time=(
+            snapshot.fetched_at
+            if arguments.planning_time == "snapshot"
+            else _parse_time(arguments.planning_time)
+        ),
         collateral_mode=CollateralMode(arguments.collateral_mode),
         travel=TravelTimeModel(
             seconds_per_jump=arguments.seconds_per_jump,
@@ -245,6 +248,11 @@ def _solver_config(arguments: argparse.Namespace) -> SolverConfig:
 
 
 def _add_planning_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--planning-time",
+        default="snapshot",
+        help="snapshot for reproducible replay, now for departure, or ISO timestamp",
+    )
     parser.add_argument("--start", required=True, help="start solar-system ID or exact name")
     parser.add_argument("--cargo-m3", type=_nonnegative_decimal, required=True)
     parser.add_argument(
@@ -334,12 +342,8 @@ def _run_scan(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
     cache = EsiResponseCache(arguments.cache)
     client = EsiClient(cache=cache)
     zkill = ZkillClient(cache=EsiResponseCache(arguments.zkill_cache))
-    snapshot = scan_public_couriers(
-        client,
-        graph,
+    snapshot = PlannerService(graph, client, zkill).scan(
         region_ids,
-        include_system_kills=True,
-        zkill=zkill,
         include_threat_intel=arguments.threat_intel,
         threat_window_seconds=arguments.threat_window_hours * 3_600,
         threat_gate_radius_m=arguments.gate_radius_km * 1_000,
@@ -357,9 +361,8 @@ def _run_scan(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
 def _run_rank(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
     snapshot = read_snapshot(arguments.snapshot)
     constraints = _constraints(graph, arguments, snapshot)
-    prepared = prepare_problem(
+    prepared = PlannerService(graph, EsiClient()).prepare(
         snapshot,
-        graph,
         constraints,
         max_candidates=arguments.max_candidates,
     )
@@ -398,21 +401,19 @@ def _print_solve_summary(result_path: Path, result_status: ProofStatus, result: 
 def _run_solve(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
     snapshot = read_snapshot(arguments.snapshot)
     constraints = _constraints(graph, arguments, snapshot)
-    prepared = prepare_problem(
+    service = PlannerService(graph, EsiClient())
+    prepared, result = service.solve(
         snapshot,
-        graph,
         constraints,
         max_candidates=arguments.max_candidates,
+        solver_config=_solver_config(arguments),
     )
-    result = solve_exact(prepared, graph, config=_solver_config(arguments))
     write_solve_result(arguments.output, result, prepared.problem)
     if arguments.state_output is not None and result.certificate.feasibility_verified:
-        state = initial_execution_state(
-            prepared.problem.constraints,
-            prepared.problem.contracts,
-            prepared.problem.active_shipments,
-            result,
+        departure = (
+            _parse_time("now") if arguments.planning_time == "now" else constraints.snapshot_time
         )
+        state = service.arm(prepared, result, at=departure)
         write_execution_state(arguments.state_output, state)
     _print_solve_summary(arguments.output, result.certificate.status, result)
     if result.certificate.objective_units is not None:
@@ -432,24 +433,26 @@ def _run_solve(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
 def _run_replan(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
     snapshot = read_snapshot(arguments.snapshot)
     state = read_execution_state(arguments.state)
-    constraints = constraints_for_replan(state, snapshot)
-    prepared = prepare_problem(
+    service = PlannerService(graph, EsiClient())
+    at = None if arguments.planning_time == "snapshot" else _parse_time(arguments.planning_time)
+    prepared, result = service.replan(
         snapshot,
-        graph,
-        constraints,
-        active_shipments=state.active_shipments,
-        excluded_contract_ids=frozenset(state.completed_contract_ids),
+        state,
+        at=at,
         max_candidates=arguments.max_candidates,
+        solver_config=_solver_config(arguments),
     )
-    result = solve_exact(prepared, graph, config=_solver_config(arguments))
     write_solve_result(arguments.output, result, prepared.problem)
     if arguments.state_output is not None and result.certificate.feasibility_verified:
-        next_state = initial_execution_state(
-            prepared.problem.constraints,
-            prepared.problem.contracts,
-            prepared.problem.active_shipments,
+        next_state = service.arm(
+            prepared,
             result,
-            completed_contract_ids=state.completed_contract_ids,
+            at=(
+                _parse_time("now")
+                if arguments.planning_time == "now"
+                else prepared.problem.constraints.snapshot_time
+            ),
+            previous=state,
         )
         write_execution_state(arguments.state_output, next_state)
     _print_solve_summary(arguments.output, result.certificate.status, result)
@@ -464,9 +467,9 @@ def _run_advance(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
     state = read_execution_state(arguments.state)
     at = _parse_time(arguments.at)
     if arguments.action == "pickup":
-        if arguments.contract_id is None or arguments.snapshot is None:
-            raise ValueError("pickup requires --contract-id and --snapshot")
-        snapshot = read_snapshot(arguments.snapshot)
+        if arguments.contract_id is None:
+            raise ValueError("pickup requires --contract-id")
+        snapshot = read_snapshot(arguments.snapshot) if arguments.snapshot is not None else None
         updated = record_pickup(state, snapshot, graph, arguments.contract_id, at)
         subject = str(arguments.contract_id)
     elif arguments.action == "delivery":
@@ -550,6 +553,9 @@ def build_parser() -> argparse.ArgumentParser:
     replan.add_argument("--output", type=Path, required=True)
     replan.add_argument("--state-output", type=Path)
     replan.add_argument("--max-candidates", type=int)
+    replan.add_argument(
+        "--planning-time", default="snapshot", help="snapshot, now, or ISO timestamp"
+    )
     _add_solver_arguments(replan)
     replan.set_defaults(handler="replan")
 
@@ -569,6 +575,15 @@ def build_parser() -> argparse.ArgumentParser:
     advance.add_argument("--at", default="now", help="ISO timestamp or 'now'")
     advance.add_argument("--output", type=Path, required=True)
     advance.set_defaults(handler="advance")
+
+    extend = subparsers.add_parser(
+        "extend", help="extend planning time without dropping commitments"
+    )
+    extend.add_argument("--state", type=Path, required=True)
+    extend.add_argument("--minutes", type=_positive_int, required=True)
+    extend.add_argument("--at", default="now", help="ISO timestamp or now")
+    extend.add_argument("--output", type=Path, required=True)
+    extend.set_defaults(handler="extend")
 
     web = subparsers.add_parser("web", help="launch the loopback-only localhost control deck")
     web.add_argument("--port", type=int, default=8765, help="localhost port (default: 8765)")
@@ -608,6 +623,15 @@ def main(argv: list[str] | None = None) -> int:
             return _run_replan(arguments, graph)
         if arguments.handler == "advance":
             return _run_advance(arguments, graph)
+        if arguments.handler == "extend":
+            state = extend_execution_horizon(
+                read_execution_state(arguments.state),
+                additional_seconds=arguments.minutes * 60,
+                at=_parse_time(arguments.at),
+            )
+            write_execution_state(arguments.output, state)
+            print(f"planning horizon extended to {state.session_deadline.isoformat()}")
+            return 0
         if arguments.handler == "web":
             return run_local_web_ui(
                 graph,

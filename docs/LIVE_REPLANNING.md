@@ -11,7 +11,7 @@ A fresh public scan alone therefore cannot represent the next optimization probl
 `ExecutionState` carries the missing commitments:
 
 - current modeled time and solar system;
-- fixed session deadline;
+- session deadline, changed only by an explicit horizon extension;
 - cargo capacity and collateral budget;
 - locked/rolling collateral mode;
 - original terminal system (the original start for a loop), pending required route systems, and the
@@ -102,8 +102,8 @@ preserves an explicitly selected non-loop finish system.
 
 ## Replan time semantics
 
-Given state time $T_s$, snapshot observation time $T_m$, and original session end $T_e$, the
-next planning time is
+Given state time $T_s$, snapshot observation time $T_m$, and session end $T_e$, the
+CLI replay planning time is
 
 $$
 T_0=\max(T_s,T_m)
@@ -117,7 +117,31 @@ $$
 
 If the fresh scan completed after the last action, this conservatively treats the character as having
 waited at the recorded system while the market was refreshed. The original session deadline never
-moves outward just because a replan happened.
+moves outward just because a replan happened. The web UI also includes current wall-clock time in
+this maximum. CLI replay keeps the historical clock by default; use `--planning-time now` or an ISO
+timestamp on `rank`, `solve`, or `replan` to choose a departure time explicitly. The planning time
+is part of the problem fingerprint, independently of the snapshot observation time.
+
+Arming through either interface independently replays the proposed itinerary at departure. Web
+arming checks the current clock, listing expiry, remaining session time, and existing delivery
+deadlines before saving any new commitments. The CLI uses its chosen planning time.
+
+### Recovering an overrun
+
+A session horizon limits future planning; it does not invalidate a real pickup, delivery, or route
+milestone. Progress may be recorded after the horizon, provided timestamps are nondecreasing and
+shipment deadlines and resource limits still hold. Accepted pickups use the embedded shipment and
+do not require a current public listing. Cargo capacity is checked for locked and rolling pickups.
+
+Use **Extend horizon** in the live panel, or:
+
+```bash
+eve-courier extend --state execution.json --minutes 60 --at now --output execution.json
+```
+
+This adds time from the later of the current horizon and the supplied action time. It preserves
+shipment deadlines, accepted/completed contracts, route targets, capacity, and collateral. Replan
+then computes a fresh route; the web UI invalidates its previous proposal when extending.
 
 ### Gate-threat-policy refresh
 
@@ -158,7 +182,8 @@ shown with a permanent **Live route** top-bar indicator and execution banner, in
 resume action and an explanation of why fresh planning is locked. When no accepted commitments
 remain, the banner can safely end the restored session and release that lock. If the saved planning
 horizon has expired while commitments still exist, the UI warns about the expired horizon but keeps
-the commitments until the operator records progress or deliberately resets them.
+the commitments and offers horizon extension. Dedicated commitment controls remain available even
+when an infeasible result has no route rows.
 
 Keep old JSON files if auditability matters. They are deterministic records of which market
 observation and state led to each plan, and every plan includes a problem fingerprint.

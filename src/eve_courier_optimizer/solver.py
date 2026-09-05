@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from importlib.metadata import version as package_version
 from itertools import combinations
@@ -1539,6 +1540,7 @@ def solve_exact(
     graph: UniverseGraph,
     *,
     config: SolverConfig | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> SolveResult:
     """Find the highest-reward valid route and return its proof metadata.
 
@@ -1551,6 +1553,8 @@ def solve_exact(
     """
 
     solver_config = config or SolverConfig()
+    if progress:
+        progress("Proving reward with the system master and exact route checks")
 
     # The decomposition often proves dense instances without constructing the full action model.
     decomposition = _run_dense_decomposition(prepared, graph, solver_config)
@@ -1644,6 +1648,8 @@ def solve_exact(
 
     # The prepass did not finish the proof. Build the complete event-level route model, carrying
     # forward every rigorous upper bound and infeasible contract set it discovered.
+    if progress:
+        progress("Searching the complete pickup and delivery model")
     route_model = _build_model(prepared)
     _apply_bound_strengthening(
         route_model,
@@ -1732,6 +1738,8 @@ def solve_exact(
     total_branches = preprocessing_branches + reward_solve_stats.branches
     total_conflicts = preprocessing_conflicts + reward_solve_stats.conflicts
     if reward_status == cp_model.OPTIMAL and solver_config.minimize_finish_time_after_proof:
+        if progress:
+            progress("Reward proven; refining route duration")
         assert reward_solve_stats.objective_units is not None
         route_model.model.add(route_model.total_reward_units == reward_solve_stats.objective_units)
         route_model.model.minimize(route_model.finish_time_seconds)
@@ -1744,6 +1752,8 @@ def solve_exact(
             total_conflicts += finish_time_solver.num_conflicts
 
     # A solver assignment is not trusted as a route until the independent simulator accepts it.
+    if progress:
+        progress("Independently verifying the route and proof")
     planned_visits, selected_contract_ids = _extract_visits(route_model, route_solution_solver)
     verified_route = simulate_and_verify(
         prepared.problem,

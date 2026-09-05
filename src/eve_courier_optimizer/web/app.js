@@ -10,6 +10,8 @@ const state = {
   rank: null,
   busy: false,
   pendingArm: false,
+  canArm: false,
+  jobId: null,
   regionScope: "security",
   selectedRegions: [],
   avoidedSystems: [],
@@ -115,14 +117,51 @@ async function api(path, options = {}) {
   return payload;
 }
 
+async function waitForJob(job) {
+  state.jobId = job.id;
+  $("#cancel-job").classList.remove("hidden");
+  $("#cancel-job").disabled = false;
+  try {
+    while (job.status === "running") {
+      $("#busy-detail").textContent = job.progress;
+      await new Promise((resolve) => window.setTimeout(resolve, 300));
+      job = (await api(`/api/jobs/${job.id}`)).job;
+    }
+    if (job.status === "failed") throw new Error(job.error || "Background operation failed.");
+    if (job.status === "cancelled") {
+      showNotice("info", "Operation cancelled.", "The saved snapshot, plan and accepted commitments were preserved.");
+      return null;
+    }
+    return job.result;
+  } finally {
+    state.jobId = null;
+    $("#cancel-job").classList.add("hidden");
+  }
+}
+
+async function runJob(operation, body) {
+  const response = await api("/api/jobs", { body: { operation, input: body } });
+  return waitForJob(response.job);
+}
+
+async function cancelJob() {
+  if (!state.jobId) return;
+  $("#cancel-job").disabled = true;
+  try {
+    await api(`/api/jobs/${state.jobId}/cancel`, { body: {} });
+  } catch (error) {
+    $("#cancel-job").disabled = false;
+    $("#busy-detail").textContent = error.message;
+  }
+}
+
 function setBusy(active, title = "Working…", detail = "") {
   state.busy = active;
   $("#busy-title").textContent = title;
   $("#busy-detail").textContent = detail;
   $("#busy-layer").classList.toggle("hidden", !active);
-  $$(`button`).forEach((button) => {
-    if (button.id !== "reset-defaults") button.dataset.wasDisabled = String(button.disabled);
-  });
+  $("#workspace").inert = active;
+  updateButtons();
 }
 
 async function withBusy(title, detail, action) {
@@ -131,7 +170,7 @@ async function withBusy(title, detail, action) {
   const started = performance.now();
   const elapsed = () => {
     const seconds = (performance.now() - started) / 1000;
-    $("#busy-elapsed").textContent = `Elapsed ${fmtDuration(seconds)} · leave this tab open`;
+    $("#busy-elapsed").textContent = `Elapsed ${fmtDuration(seconds)} · you can return to this page while it runs`;
   };
   elapsed();
   const timer = setInterval(elapsed, 1000);
@@ -168,6 +207,7 @@ function setWorkflow(stage) {
 }
 
 function updateButtons() {
+  $("#start-execution").disabled = state.busy || !state.canArm;
   const hasSnapshot = Boolean(state.snapshot);
   const live = Boolean(state.execution);
   $("#scan-button").disabled = state.busy || live;
@@ -548,8 +588,54 @@ function renderExecutionLock(execution) {
   }
 }
 
+function renderCommitments(execution) {
+  const list = $("#commitment-list");
+  list.replaceChildren();
+  for (const shipment of execution?.active_shipments || []) {
+    const item = document.createElement("div");
+    item.className = "commitment-row";
+    const description = document.createElement("span");
+    const id = shipment.contract.contract_id;
+    const destination = shipment.picked ? shipment.destination_system_name : shipment.origin_system_name;
+    description.textContent = `#${id} · ${shipment.picked ? "Deliver at" : "Pick up at"} ${destination} · deadline ${new Date(shipment.deadline).toLocaleString()}`;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "row-action";
+    const action = shipment.picked ? "delivery" : "pickup";
+    button.textContent = `Record ${action} #${id}`;
+    button.addEventListener("click", () => recordAction(action, String(id)));
+    item.append(description, button);
+    list.append(item);
+  }
+  const markers = [...(execution?.remaining_required_systems || [])];
+  if (execution?.terminal_system_id && execution.current_system_id !== execution.terminal_system_id
+      && !markers.some((item) => item.system_id === execution.terminal_system_id)) {
+    markers.push({ system_id: execution.terminal_system_id, name: execution.terminal_system_name });
+  }
+  for (const system of markers) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "row-action";
+    button.textContent = `Mark ${system.name} reached`;
+    button.addEventListener("click", () => recordRouteSystem(system.system_id, system.name));
+    list.append(button);
+  }
+}
+
+async function extendHorizon() {
+  const result = await withBusy("Extending planning horizon…", "Preserving every contract deadline.",
+    () => api("/api/execution/extend", { body: { minutes: $("#extend-minutes").value } }));
+  if (!result) return;
+  state.pendingArm = false;
+  state.canArm = false;
+  renderPlan(null);
+  renderExecution(result.execution);
+  showNotice("success", "Planning horizon extended.", "Accepted contracts and their deadlines are unchanged. Replan to compute a new route.");
+}
+
 function renderExecution(execution) {
   state.execution = execution;
+  renderCommitments(execution);
   const card = $("#execution-card");
   const commit = $("#commit-box");
   const liveTools = $("#live-tools");
@@ -594,7 +680,7 @@ function renderExecution(execution) {
     setWorkflow("run");
   }
   renderExecutionLock(execution);
-  const locked = $("#collateral-mode").value === "locked";
+  const locked = (state.plan?.model?.collateral_mode || state.execution?.collateral_mode) === "locked";
   $("#locked-confirm-row").classList.toggle("hidden", !locked);
   renderRoute(state.plan);
   updateButtons();
@@ -625,7 +711,7 @@ function renderRank(payload) {
     tr.append(makeCell(fmtISK(item.collateral_isk)));
     tr.append(makeCell(fmtNumber(item.solo_jumps)));
     tr.append(makeCell(fmtISK(item.reward_per_hour_isk)));
-    tr.append(makeCell(Number(item.reward_to_collateral).toFixed(4)));
+    tr.append(makeCell(item.reward_to_collateral === null ? "--" : Number(item.reward_to_collateral).toFixed(4)));
     tbody.append(tr);
   }
 }
@@ -722,11 +808,23 @@ function hydratePlannerFromPlan(plan) {
 async function loadStatus() {
   try {
     const payload = await api("/api/status");
+    if (payload.job?.status === "running") {
+      await withBusy("Resuming background operation…", payload.job.progress,
+        () => waitForJob(payload.job));
+      return loadStatus();
+    }
+    state.canArm = Boolean(payload.plan_armable);
+    state.pendingArm = state.canArm && Boolean(payload.execution)
+      && payload.plan?.model?.collateral_mode === "locked"
+      && (payload.plan?.summary?.selected_contract_ids?.length || 0) > 0;
     $("#sde-pill").textContent = `SDE ${payload.sde.build_number} · ${fmtNumber(payload.sde.systems)} systems`;
     renderSnapshot(payload.snapshot);
     hydratePlannerFromPlan(payload.plan);
     renderPlan(payload.plan);
     renderExecution(payload.execution);
+    if (payload.job?.operation === "rank" && payload.job.status === "completed") {
+      renderRank(payload.job.result);
+    }
     if (payload.execution) {
       showNotice("warning", "Live execution restored.", "This route survived the restart. Planning controls remain locked until you end the session; use the persistent banner above to resume it.");
     } else if (payload.snapshot) {
@@ -772,9 +870,10 @@ async function scan() {
       : state.regionScope === "security"
         ? "Skipping SDE regions that contain no system in the selected security bands; mixed regions are retained."
         : "Using bounded ESI concurrency and cache/rate-limit handling; gate intel covers every region this configured route could traverse.",
-    () => api("/api/scan", { body }),
+    () => runJob("scan", body),
   );
   if (!result) return;
+  state.canArm = false;
   renderSnapshot(result.snapshot);
   renderPlan(null);
   renderRank(null);
@@ -796,7 +895,7 @@ async function rank() {
   const result = await withBusy(
     "Ranking feasible opportunities…",
     "Applying endpoint, security, danger-policy, capacity, collateral, expiry and horizon filters.",
-    () => api("/api/rank", { body: plannerPayload() }),
+    () => runJob("rank", plannerPayload()),
   );
   if (!result) return;
   renderRank(result);
@@ -814,10 +913,11 @@ async function solve() {
   const result = await withBusy(
     "Optimizing route & proving reward…",
     cap ? "Exact inside the retained candidate set. The certificate will mark the global scope as truncated." : "No candidate cap: the solver is working over every eligible contract retained by safe reductions.",
-    () => api("/api/solve", { body: plannerPayload() }),
+    () => runJob("solve", plannerPayload()),
   );
   if (!result) return;
   state.pendingArm = false;
+  state.canArm = Boolean(result.plan.certificate.feasibility_verified);
   renderPlan(result.plan);
   renderExecution(null);
   const cert = result.plan.certificate;
@@ -830,7 +930,7 @@ async function solve() {
 }
 
 async function startExecution() {
-  const locked = $("#collateral-mode").value === "locked";
+  const locked = (state.plan?.model?.collateral_mode || state.execution?.collateral_mode) === "locked";
   const selected = state.plan?.summary?.selected_contract_ids?.length || 0;
   if (locked && selected > 0 && !$("#locked-confirm").checked) {
     showNotice("warning", "Acceptance confirmation required.", "Check the box only after accepting every selected contract in EVE.");
@@ -843,6 +943,7 @@ async function startExecution() {
   );
   if (!result) return;
   state.pendingArm = false;
+  state.canArm = false;
   renderExecution(result.execution);
   showNotice("success", "Execution session armed.", "Use the route-table buttons to record real pickups and deliveries.");
 }
@@ -856,6 +957,7 @@ async function recordAction(action, contractId) {
     () => api("/api/action", { body: { action, contract_id: contractId, at: "now" } }),
   );
   if (!result) return;
+  state.canArm = false;
   if (invalidatesReview) state.pendingArm = false;
   renderExecution(result.execution);
   if (invalidatesReview) {
@@ -877,6 +979,7 @@ async function recordRouteSystem(systemId, systemName) {
     () => api("/api/action", { body: { action: "route_system", system_id: systemId, at: "now" } }),
   );
   if (!result) return;
+  state.canArm = false;
   if (invalidatesReview) state.pendingArm = false;
   renderExecution(result.execution);
   showNotice(
@@ -892,12 +995,14 @@ async function replan() {
   const result = await withBusy(
     "Refreshing market & replanning…",
     "Accepted contracts remain mandatory; fresh public opportunities may be added around them.",
-    () => api("/api/replan", { body: { ...plannerPayload(), refresh: true } }),
+    () => runJob("replan", { ...plannerPayload(), refresh: true }),
   );
   if (!result) return;
-  state.pendingArm = $("#collateral-mode").value === "locked"
+  state.canArm = Boolean(result.plan.certificate?.feasibility_verified);
+  state.pendingArm = state.canArm && result.execution?.collateral_mode === "locked"
     && (result.plan.summary?.selected_contract_ids?.length || 0) > 0;
   renderSnapshot(result.snapshot);
+  hydratePlannerFromPlan(result.plan);
   renderPlan(result.plan);
   renderExecution(result.execution);
   $("#locked-confirm").checked = false;
@@ -922,8 +1027,8 @@ async function replan() {
   if (state.pendingArm) {
     $("#start-execution").textContent = "Apply revised plan to execution";
     showNotice("warning", "Replan is ready but not armed yet.", "Review the new certificate and route. In locked mode, accept any newly selected contracts in EVE before applying the revised plan.");
-  } else {
-    showNotice("success", "Rolling-mode replan ready.", "Existing accepted shipments remain mandatory; future optional jobs become commitments only when you record their pickups.");
+  } else if (state.canArm) {
+    showNotice("success", "Replan ready.", "Existing accepted shipments remain mandatory; future optional jobs become commitments only when you record their pickups.");
   }
 }
 
@@ -940,6 +1045,7 @@ async function resetExecution() {
   );
   if (!result) return;
   state.pendingArm = false;
+  state.canArm = false;
   renderExecution(null);
   $("#start-execution").textContent = "Arm this plan for execution";
   if (canEndSafely) {
@@ -1237,6 +1343,8 @@ function wireSuggestions() {
 }
 
 function wireEvents() {
+  $("#cancel-job").addEventListener("click", cancelJob);
+  $("#extend-horizon").addEventListener("click", extendHorizon);
   $("#scan-button").addEventListener("click", scan);
   $("#rank-button").addEventListener("click", rank);
   $("#solve-button").addEventListener("click", solve);

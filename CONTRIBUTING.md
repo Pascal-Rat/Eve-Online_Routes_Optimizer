@@ -18,7 +18,26 @@ Run every release gate before submitting a change:
 PYTHONPATH=src .venv/bin/python -m benchmarks.run_frozen --time-limit 10
 ```
 
-The test command enforces branch-aware coverage of at least 85%.
+The test command enforces branch-aware coverage of at least 85%, including spawned workers.
+Also run the real frozen Empire reward/proof regression:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m benchmarks.run_empire --time-limit 60
+```
+
+For UI changes, install the optional browser test dependencies and run the Chromium workflows:
+
+```bash
+.venv/bin/python -m pip install -e ".[dev,browser]"
+.venv/bin/python -m playwright install chromium
+.venv/bin/ruff check browser_tests
+.venv/bin/mypy browser_tests
+.venv/bin/pytest browser_tests --no-cov --browser chromium --tracing retain-on-failure
+```
+
+Browser tests use local synthetic ESI responses. CI runs them separately and retains failure traces.
+They cover scan/rank/solve/arming, reloads, real progress after infeasible replans, horizon recovery,
+zero-denominator scores, and job cancellation.
 
 ## Proof-sensitive changes
 

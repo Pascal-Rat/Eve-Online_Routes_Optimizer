@@ -28,21 +28,23 @@ def _scan_contract_regions(
     region_ids: tuple[int, ...],
     *,
     workers: int,
+    progress: Callable[[str], None] | None = None,
 ) -> dict[int, tuple[PublicCourierContract, ...]]:
     """Fetch independent ESI regions concurrently while pagination stays sequential per region."""
 
     if workers <= 0 or workers > MAX_CONTRACT_SCAN_WORKERS:
-        raise ValueError(
-            f"contract scan workers must be between 1 and {MAX_CONTRACT_SCAN_WORKERS}"
-        )
-    if workers == 1 or len(region_ids) == 1:
-        return {region_id: client.public_couriers(region_id) for region_id in region_ids}
+        raise ValueError(f"contract scan workers must be between 1 and {MAX_CONTRACT_SCAN_WORKERS}")
     with ThreadPoolExecutor(
         max_workers=min(workers, len(region_ids)),
         thread_name_prefix="esi-courier-region",
     ) as executor:
         values = executor.map(client.public_couriers, region_ids)
-        return dict(zip(region_ids, values, strict=True))
+        contracts = {}
+        for index, (region_id, rows) in enumerate(zip(region_ids, values, strict=True), 1):
+            contracts[region_id] = rows
+            if progress:
+                progress(f"Contract regions observed: {index}/{len(region_ids)}")
+        return contracts
 
 
 def scan_public_couriers(
@@ -58,6 +60,7 @@ def scan_public_couriers(
     threat_gate_radius_m: int = DEFAULT_GATE_RADIUS_M,
     threat_region_ids: Iterable[int] | None = None,
     contract_workers: int = DEFAULT_CONTRACT_SCAN_WORKERS,
+    progress: Callable[[str], None] | None = None,
 ) -> ContractSnapshot:
     """Capture public couriers plus optional activity/threat observations.
 
@@ -78,9 +81,7 @@ def scan_public_couriers(
     if unknown:
         raise ValueError(f"unknown SDE region IDs: {unknown}")
 
-    threat_regions = (
-        regions if threat_region_ids is None else tuple(sorted(set(threat_region_ids)))
-    )
+    threat_regions = regions if threat_region_ids is None else tuple(sorted(set(threat_region_ids)))
     unknown_threat = [region_id for region_id in threat_regions if region_id not in graph.regions]
     if unknown_threat:
         raise ValueError(f"unknown threat region IDs: {unknown_threat}")
@@ -88,7 +89,14 @@ def scan_public_couriers(
         raise ValueError("at least one threat region is required when threat intel is enabled")
 
     contracts_by_id = {}
-    contracts_by_region = _scan_contract_regions(client, regions, workers=contract_workers)
+    if progress:
+        progress("Scanning public contract regions")
+    contracts_by_region = _scan_contract_regions(
+        client,
+        regions,
+        workers=contract_workers,
+        progress=progress,
+    )
     for region_id in regions:
         for contract in contracts_by_region[region_id]:
             contracts_by_id[contract.contract_id] = contract
@@ -107,6 +115,8 @@ def scan_public_couriers(
     now = now.astimezone(UTC)
     threat: ThreatIntelCollection | None = None
     if include_threat_intel:
+        if progress:
+            progress("Collecting gate-threat observations")
         if zkill is None:
             raise ValueError("zKill client is required when threat intel is requested")
         threat = collect_gate_threat_intel(
@@ -129,9 +139,7 @@ def scan_public_couriers(
         threat_window_seconds=threat.window_seconds if threat is not None else None,
         threat_gate_radius_m=threat.gate_radius_m if threat is not None else None,
         threat_coverage_region_ids=threat.coverage_region_ids if threat is not None else (),
-        threat_incomplete_region_ids=(
-            threat.incomplete_region_ids if threat is not None else ()
-        ),
+        threat_incomplete_region_ids=(threat.incomplete_region_ids if threat is not None else ()),
         threat_killmails_seen=threat.killmails_seen if threat is not None else 0,
         gate_threat_events=threat.events if threat is not None else (),
     )
