@@ -199,7 +199,13 @@ The web UI is the recommended operator interface, but every core workflow is als
 ```
 
 Run `eve-courier COMMAND --help` for the complete options. Live execution and replanning also have
-CLI commands; see [Live replanning](docs/LIVE_REPLANNING.md).
+CLI commands; see [Live replanning](docs/LIVE_REPLANNING.md). CLI planning defaults to the snapshot
+clock for reproducible replay; add `--planning-time now` for current departure-time checks. The web
+UI always plans from the current clock and revalidates before arming.
+
+Long web operations show progress and can be cancelled or resumed after a browser refresh. Accepted
+shipments have dedicated progress controls even after an infeasible replan. Use **Extend horizon**
+(or `eve-courier extend`) to add planning time while keeping all contract deadlines and commitments.
 
 ## Architecture and documentation
 

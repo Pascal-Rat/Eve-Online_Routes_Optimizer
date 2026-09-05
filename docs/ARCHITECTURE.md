@@ -63,6 +63,7 @@ mutation of the old optimization problem.
 | `reporting.py` | stable, versioned plan JSON shared by CLI and web UI |
 | `execution.py` | persistent live commitments, original terminal/required-route state, parcel cap, and progress transitions |
 | `service.py` | application boundary shared by the CLI and localhost UI |
+| `jobs.py` | isolated cancellable work and publication of completed results |
 | `webapp.py` | loopback-only HTTP/session boundary over `PlannerService` |
 | `web/` | packaged HTML/CSS/JS control deck; presentation only, no constraint engine |
 | `cli.py` | user-facing orchestration only; mathematical logic remains below it |
@@ -202,10 +203,16 @@ There are three versioned JSON artifacts:
   accepted shipments, original terminal, pending required systems, parcel cap, and completed contract
   IDs for stale-ESI suppression.
 
-`PlannerService` exposes scan/prepare/solve/replan without terminal or HTTP I/O. `webapp.py` maps
+`PlannerService` exposes scan/prepare/solve/replan and departure revalidation without terminal or HTTP
+I/O. Both CLI and web use it to coordinate those workflows. `webapp.py` maps
 validated JSON requests into those Python operations and persists the same artifacts as the CLI.
 The packaged browser assets render decorated copies of those results; they do not implement routing
 or feasibility rules. This keeps one authoritative mathematical implementation.
+
+`jobs.py` runs one long operation at a time in a spawned process with a private artifact workspace.
+The parent HTTP process owns durable state and publishes only successful results when polling the
+worker pipe. Cancellation terminates the worker without applying its staged state. Progress callbacks
+report scan and solver phases without coupling the mathematical modules to HTTP.
 
 The HTTP server listens on `127.0.0.1` only, rejects non-local `Host`/`Origin` values, limits JSON
 request bodies, sends a restrictive Content Security Policy, and serves no user-supplied file paths.

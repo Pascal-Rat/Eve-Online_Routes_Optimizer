@@ -122,13 +122,13 @@ is never serialized as an upper bound.
 
 ## Execution state -- schema 3
 
-Created by `solve --state-output`, `replan --state-output`, `advance`, or the localhost control deck.
+Created by `solve --state-output`, `replan --state-output`, `advance`, `extend`, or the localhost control deck.
 The reader accepts schema 1 and 2 state. Older states predate route-shape persistence, so they are
 read as open routes with no required systems and no simultaneous-contract limit.
 
 Execution state contains:
 
-- current time/system and immutable original session deadline;
+- current time/system and session deadline (preserved by replans, explicitly extendable);
 - cargo/collateral limits and collateral mode;
 - `terminal_system_id`, preserving the original loop return or fixed finish across replans;
 - `remaining_required_system_ids`, removing systems as actual progress reaches them;
@@ -142,6 +142,13 @@ Execution state contains:
 Each active shipment embeds the immutable public contract, resolved origin/destination system,
 absolute deadline, and `picked` flag. This duplication is intentional: an accepted job remains
 replannable even when it disappears from every later public snapshot.
+
+The session timestamp may exceed `session_deadline` when real progress outlasts the planning
+budget. Each active shipment still retains its own delivery deadline. A horizon extension changes
+only current time and session deadline; it does not extend contract deadlines.
+
+Web ranking responses represent undefined/infinite ratios as JSON `null`, displayed as `--`.
+Internal ranking still orders these cases consistently. The HTTP boundary emits strict JSON.
 
 ## Compatibility and validation
 

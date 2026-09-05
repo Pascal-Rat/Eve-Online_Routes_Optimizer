@@ -506,6 +506,13 @@
                 Record pickups, deliveries, and required route milestones as they actually happen. The next
                 replan keeps every accepted shipment and trip target mandatory.
               </p>
+              <div id="commitment-list" aria-label="Accepted commitments and pending route systems"></div>
+              <div class="horizon-extension">
+                <label for="extend-minutes">Extend planning horizon (minutes)</label>
+                <input id="extend-minutes" type="number" min="1" step="1" value="60">
+                <button class="button secondary compact" id="extend-horizon" type="button">Extend horizon</button>
+                <small>Adds time from the later of now or the current horizon. Contract deadlines stay unchanged.</small>
+              </div>
               <div class="live-actions">
                 <button class="button secondary compact" id="replan-button" type="button">
                   Refresh market &amp; replan
@@ -566,6 +573,7 @@
           <strong id="busy-title">Working…</strong>
           <small id="busy-detail"></small>
           <small id="busy-elapsed"></small>
+          <button id="cancel-job" class="button secondary compact hidden" type="button">Cancel operation</button>
         </div>
       </div>
     </div>

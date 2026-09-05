@@ -215,3 +215,26 @@ def test_system_kills_reject_malformed_payloads(payload: object) -> None:
     client = EsiClient(transport=QueueTransport([response(payload)]))
     with pytest.raises(EsiError, match="system-kills"):
         client.system_kills()
+
+
+class FailingTransport(QueueTransport):
+    def __init__(self, failures: int) -> None:
+        super().__init__([response([courier(1)], headers={"X-Pages": "1"})])
+        self.failures = failures
+
+    def get(self, url: str, headers: Mapping[str, str], timeout_seconds: float) -> HttpResponse:
+        if self.failures:
+            self.failures -= 1
+            raise TimeoutError("temporary network timeout")
+        return super().get(url, headers, timeout_seconds)
+
+
+def test_network_errors_retry_and_exhaust_as_esi_errors() -> None:
+    sleeps: list[float] = []
+    client = EsiClient(transport=FailingTransport(2), max_retries=2, sleep=sleeps.append)
+    assert len(client.public_couriers(10)) == 1
+    assert sleeps == [1, 2]
+    client = EsiClient(transport=FailingTransport(3), max_retries=2, sleep=sleeps.append)
+    with pytest.raises(EsiError, match="network request failed") as raised:
+        client.public_couriers(10)
+    assert isinstance(raised.value.__cause__, TimeoutError)

@@ -122,7 +122,9 @@ The automated regression is:
 ```
 
 The runner exits nonzero unless every scenario returns `proven_optimal`, has untruncated scope, and
-passes independent feasibility verification.
+passes independent feasibility verification, and matches the frozen reward (250M ISK for DST,
+165M for BR). The Empire runner also requires a closed proof and the exact reward and bound:
+58M ISK for DST and 25,651,527 ISK for BR. Both runners execute in CI.
 
 ## Small-fixture reference result
 
@@ -135,7 +137,7 @@ The compact release-tree run, with loop closure explicit in the fixture runner, 
 
 Elapsed time is informational and will differ by CPU, operating system, Python/OR-Tools build, and
 background load. The stable regression requirements are the proof status, untruncated scope,
-independent feasibility, and nonempty solution--not a wall-clock threshold or one particular route
+independent feasibility, and exact expected reward, rather than a wall-clock threshold or one route
 among objective ties.
 
 ## What this benchmark does not claim

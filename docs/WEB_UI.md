@@ -56,7 +56,9 @@ discovery scope remains exactly what the user selected.
 The header reports snapshot age and SDE identity. Snapshot age is derived in the browser from the
 persisted `fetched_at` timestamp once per second, so it continues advancing after a scan finishes.
 Scanning and solving remain distinct: changing solver inputs never changes the captured market
-observation.
+observation. A completed scan removes the previous saved plan, including after a server restart.
+Network interruptions receive bounded retries. Unavailable advisory system-kill activity does not
+discard successfully scanned contracts.
 
 ### 2. Inspect
 
@@ -135,6 +137,11 @@ security status. These are the paths independently verified by Python, not a bro
 If threat categories were active, the banner explicitly notes that threat-blocked systems were
 unavailable as **transit** as well as pickup/delivery endpoints.
 
+The web planner starts from current wall-clock time, even when inspecting a restored snapshot.
+Expired listings are filtered accordingly. At arming, the proposed itinerary is independently
+rechecked at the actual departure time, so a listing expiring during review requires a fresh solve.
+The original proof remains a statement about its recorded planning time.
+
 ### 4. Arm and execute
 
 A solved route is not automatically a claim about what happened in EVE.
@@ -197,8 +204,11 @@ make an in-game courier obligation disappear.
 
 `proven_infeasible` after a live replan is a statement about the remaining trip, not a broken UI. If
 accepted shipments remain, CP-SAT proved that those mandatory commitments cannot all satisfy the
-remaining time and route policy. Record real progress if the state has changed and replan again, or
-reset only if you deliberately want the optimizer to stop preserving those commitments.
+remaining time and route policy. Dedicated controls in the live panel let you record each accepted
+pickup/delivery and pending route-system visit even when the new plan has no route rows. Real
+progress remains recordable after the planning horizon, subject to contract deadlines and resource
+limits. **Extend horizon** adds planning time without changing any shipment deadline or dropping
+commitments. It clears the old proposal; use Replan to compute a new route.
 
 When `active_count == 0`, the UI instead shows **End execution & start new plan**. Ending is then safe
 with respect to courier commitments and immediately unlocks Scan/Rank/Optimize. The persistent banner
@@ -241,10 +251,14 @@ small defense-in-depth boundary:
   Policy; and
 - API failures return JSON and never expose an interactive debug console.
 
-The standard library server is intentionally single-process and sequential. A long scan or exact
-solve makes the UI show a blocking working indicator with a live elapsed-time counter rather than
-allowing overlapping mutations of the same session state. This is a correctness choice for a
-one-user local tool, not a throughput architecture.
+The HTTP server serializes session mutations. Scan, rank, solve, and replan run in an isolated
+background process, keeping status and cancellation responsive while the UI displays the current
+phase and elapsed time. **Cancel operation** terminates the worker; a failed or cancelled operation
+leaves saved snapshots, plans, and commitments intact. HTTP caches may retain completed responses.
+Only completed work is published by the server. Overlapping mutations are rejected while a job runs.
+
+Refreshing or reopening the browser reconnects to the current job. Jobs live for the server session;
+closing the server stops unfinished work, and completed artifacts remain available on restart.
 
 The public-data workflow requires no OAuth client ID, client secret, access token or EVE login.
 Nothing in the web assets contains authentication material.
@@ -255,7 +269,10 @@ The JavaScript control deck uses these same-origin endpoints:
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/status` | SDE identity and persisted snapshot/plan/execution summary |
+| `GET` | `/api/status` | SDE identity, snapshot/plan/execution summary, arming availability and latest job |
+| `POST` | `/api/jobs` | start `scan`, `rank`, `solve`, or `replan` with an `input` object; returns HTTP 202 |
+| `GET` | `/api/jobs/{id}` | status, phase, elapsed time and completed result/error |
+| `POST` | `/api/jobs/{id}/cancel` | cancel a running operation |
 | `GET` | `/api/regions?q=...` | region-name suggestions from bundled SDE |
 | `GET` | `/api/systems?q=...` | system-name suggestions from bundled SDE |
 | `POST` | `/api/scan` | capture public couriers plus optional gate-threat observations for explicit, security-compatible, NPC-Empire, or all-region scope |
@@ -264,9 +281,11 @@ The JavaScript control deck uses these same-origin endpoints:
 | `POST` | `/api/execution/start` | turn the current verified plan into execution state |
 | `POST` | `/api/action` | record a real pickup, delivery, required waypoint, or finish-system visit |
 | `POST` | `/api/replan` | optionally refresh ESI and solve around mandatory state |
+| `POST` | `/api/execution/extend` | extend the planning horizon by positive integer `minutes` |
 | `POST` | `/api/execution/reset` | explicitly discard the persisted live session |
 | `GET` | `/download/{snapshot,plan,execution}.json` | download an existing audit artifact |
 
+The UI uses jobs for long operations; synchronous scan/rank/solve/replan endpoints remain available.
 The API is an internal UI boundary, not a stable remote-service contract. The versioned JSON files
 remain the durable data contract described in [JSON_FORMATS.md](JSON_FORMATS.md).
 

@@ -48,8 +48,10 @@ class ExecutionState:
     def __post_init__(self) -> None:
         if self.current_time.tzinfo is None or self.session_deadline.tzinfo is None:
             raise ValueError("execution timestamps must be timezone-aware")
-        if self.current_time > self.session_deadline:
-            raise ValueError("execution time is after the session deadline")
+        if self.current_system_id <= 0:
+            raise ValueError("execution system ID must be positive")
+        if self.cargo_capacity_units < 0 or self.collateral_budget_units < 0:
+            raise ValueError("execution resource limits cannot be negative")
         if self.terminal_system_id is not None and self.terminal_system_id <= 0:
             raise ValueError("execution terminal system ID must be positive")
         if any(system_id <= 0 for system_id in self.remaining_required_system_ids):
@@ -60,9 +62,17 @@ class ExecutionState:
             raise ValueError("completed contract IDs must be positive")
         if len(self.completed_contract_ids) != len(set(self.completed_contract_ids)):
             raise ValueError("completed contract IDs must be unique")
-        active_ids = {
-            shipment.contract.contract.contract_id for shipment in self.active_shipments
-        }
+        active_ids = {shipment.contract.contract.contract_id for shipment in self.active_shipments}
+        if len(active_ids) != len(self.active_shipments):
+            raise ValueError("active shipment contract IDs must be unique")
+        if sum(s.contract.contract.volume_units for s in self.active_shipments if s.picked) > (
+            self.cargo_capacity_units
+        ):
+            raise ValueError("execution cargo exceeds cargo capacity")
+        if sum(s.contract.contract.collateral_units for s in self.active_shipments) > (
+            self.collateral_budget_units
+        ):
+            raise ValueError("execution collateral exceeds budget")
         if active_ids & set(self.completed_contract_ids):
             raise ValueError("a contract cannot be both active and completed")
         picked_count = sum(1 for shipment in self.active_shipments if shipment.picked)
@@ -97,8 +107,7 @@ def initial_execution_state(
             item = optional[contract_id]
             active_by_id[contract_id] = ActiveShipment(
                 contract=item,
-                deadline=constraints.snapshot_time
-                + timedelta(days=item.contract.days_to_complete),
+                deadline=constraints.snapshot_time + timedelta(days=item.contract.days_to_complete),
                 picked=False,
             )
     return ExecutionState(
@@ -123,11 +132,15 @@ def initial_execution_state(
 def constraints_for_replan(
     state: ExecutionState,
     snapshot: ContractSnapshot,
+    *,
+    at: datetime | None = None,
 ) -> PlanningConstraints:
-    effective_time = max(state.current_time, snapshot.fetched_at)
+    if at is not None and at.tzinfo is None:
+        raise ValueError("replanning time must be timezone-aware")
+    effective_time = max(state.current_time, snapshot.fetched_at, at or state.current_time)
+    if effective_time > state.session_deadline:
+        raise ValueError("planning horizon has ended; extend the horizon before replanning")
     remaining = int((state.session_deadline - effective_time).total_seconds())
-    if remaining < 0:
-        raise ValueError("execution session has already ended")
     security = state.security
     exemptions = {state.current_system_id}
     exemptions.update(state.remaining_required_system_ids)
@@ -194,15 +207,15 @@ def constraints_for_replan(
 
 def record_pickup(
     state: ExecutionState,
-    snapshot: ContractSnapshot,
+    snapshot: ContractSnapshot | None,
     graph: UniverseGraph,
     contract_id: int,
     at: datetime,
 ) -> ExecutionState:
     """Record a successful in-game pickup/accept-and-pickup event."""
 
-    if at < state.current_time or at > state.session_deadline:
-        raise ValueError("pickup time is outside the execution session")
+    if at.tzinfo is None or at < state.current_time:
+        raise ValueError("pickup time must be timezone-aware and cannot precede recorded progress")
     active_by_id = {
         shipment.contract.contract.contract_id: shipment for shipment in state.active_shipments
     }
@@ -210,6 +223,15 @@ def record_pickup(
     if existing is not None:
         if existing.picked:
             raise ValueError(f"contract {contract_id} is already picked up")
+        if at > existing.deadline:
+            raise ValueError(f"contract {contract_id} is past its delivery deadline")
+        cargo_now = sum(
+            shipment.contract.contract.volume_units
+            for shipment in state.active_shipments
+            if shipment.picked
+        )
+        if cargo_now + existing.contract.contract.volume_units > state.cargo_capacity_units:
+            raise ValueError("pickup would exceed cargo capacity")
         if (
             state.max_simultaneous_contracts is not None
             and sum(1 for shipment in state.active_shipments if shipment.picked) + 1
@@ -229,6 +251,8 @@ def record_pickup(
 
     if state.collateral_mode is CollateralMode.LOCKED:
         raise ValueError("locked-mode pickup must already exist as an accepted commitment")
+    if snapshot is None:
+        raise ValueError("a snapshot is required to accept a new rolling contract")
     public = next((item for item in snapshot.contracts if item.contract_id == contract_id), None)
     if public is None:
         raise ValueError(f"contract {contract_id} is not present in the supplied snapshot")
@@ -276,8 +300,10 @@ def record_pickup(
 
 
 def record_delivery(state: ExecutionState, contract_id: int, at: datetime) -> ExecutionState:
-    if at < state.current_time or at > state.session_deadline:
-        raise ValueError("delivery time is outside the execution session")
+    if at.tzinfo is None or at < state.current_time:
+        raise ValueError(
+            "delivery time must be timezone-aware and cannot precede recorded progress"
+        )
     active_by_id = {
         shipment.contract.contract.contract_id: shipment for shipment in state.active_shipments
     }
@@ -310,13 +336,32 @@ def record_route_system(state: ExecutionState, system_id: int, at: datetime) -> 
         allowed_markers.add(state.terminal_system_id)
     if system_id not in allowed_markers:
         raise ValueError("system is not a pending required waypoint or finish")
-    if at < state.current_time or at > state.session_deadline:
-        raise ValueError("route-system time is outside the execution session")
+    if at.tzinfo is None or at < state.current_time:
+        raise ValueError("route-system time must be timezone-aware and cannot precede progress")
     return replace(
         state,
         current_time=at,
         current_system_id=system_id,
         remaining_required_system_ids=state.remaining_required_system_ids - {system_id},
+    )
+
+
+def extend_execution_horizon(
+    state: ExecutionState,
+    *,
+    additional_seconds: int,
+    at: datetime,
+) -> ExecutionState:
+    """Extend the planning budget without changing any accepted contract deadline."""
+
+    if additional_seconds <= 0:
+        raise ValueError("horizon extension must be positive")
+    if at.tzinfo is None or at < state.current_time:
+        raise ValueError("extension time must be timezone-aware and cannot precede progress")
+    return replace(
+        state,
+        current_time=at,
+        session_deadline=max(at, state.session_deadline) + timedelta(seconds=additional_seconds),
     )
 
 
@@ -351,9 +396,7 @@ def execution_state_to_dict(state: ExecutionState) -> dict[str, Any]:
                 if state.security.gank_activity_fetched_at is not None
                 else None
             ),
-            "threat_avoided_system_ids": sorted(
-                state.security.threat_avoided_system_ids
-            ),
+            "threat_avoided_system_ids": sorted(state.security.threat_avoided_system_ids),
             "threat_categories": sorted(
                 category.value for category in state.security.threat_categories
             ),
@@ -365,12 +408,8 @@ def execution_state_to_dict(state: ExecutionState) -> dict[str, Any]:
             ),
             "threat_window_seconds": state.security.threat_window_seconds,
             "threat_gate_radius_m": state.security.threat_gate_radius_m,
-            "threat_coverage_region_ids": sorted(
-                state.security.threat_coverage_region_ids
-            ),
-            "threat_incomplete_region_ids": sorted(
-                state.security.threat_incomplete_region_ids
-            ),
+            "threat_coverage_region_ids": sorted(state.security.threat_coverage_region_ids),
+            "threat_incomplete_region_ids": sorted(state.security.threat_incomplete_region_ids),
         },
         "completed_contract_ids": list(state.completed_contract_ids),
         "active_shipments": [
@@ -411,16 +450,12 @@ def execution_state_from_dict(payload: dict[str, Any]) -> ExecutionState:
             )
         )
     minimum_security_raw = raw_security.get("minimum_security")
-    minimum_security = (
-        None if minimum_security_raw is None else float(minimum_security_raw)
-    )
+    minimum_security = None if minimum_security_raw is None else float(minimum_security_raw)
     raw_allowed_bands = raw_security.get("allowed_bands")
     allowed_bands = (
         None
         if raw_allowed_bands is None
-        else frozenset(
-            SecurityBand(str(item)) for item in cast(list[Any], raw_allowed_bands)
-        )
+        else frozenset(SecurityBand(str(item)) for item in cast(list[Any], raw_allowed_bands))
     )
     raw_gank_threshold = raw_security.get("gank_ship_kill_threshold")
     raw_gank_time = raw_security.get("gank_activity_fetched_at")
@@ -454,9 +489,7 @@ def execution_state_from_dict(payload: dict[str, Any]) -> ExecutionState:
             ),
             threat_avoided_system_ids=frozenset(
                 int(item)
-                for item in cast(
-                    list[Any], raw_security.get("threat_avoided_system_ids", [])
-                )
+                for item in cast(list[Any], raw_security.get("threat_avoided_system_ids", []))
             ),
             threat_categories=frozenset(
                 ThreatCategory(str(item))
@@ -482,15 +515,11 @@ def execution_state_from_dict(payload: dict[str, Any]) -> ExecutionState:
             ),
             threat_coverage_region_ids=frozenset(
                 int(item)
-                for item in cast(
-                    list[Any], raw_security.get("threat_coverage_region_ids", [])
-                )
+                for item in cast(list[Any], raw_security.get("threat_coverage_region_ids", []))
             ),
             threat_incomplete_region_ids=frozenset(
                 int(item)
-                for item in cast(
-                    list[Any], raw_security.get("threat_incomplete_region_ids", [])
-                )
+                for item in cast(list[Any], raw_security.get("threat_incomplete_region_ids", []))
             ),
         ),
         terminal_system_id=(
@@ -499,8 +528,7 @@ def execution_state_from_dict(payload: dict[str, Any]) -> ExecutionState:
             else None
         ),
         remaining_required_system_ids=frozenset(
-            int(item)
-            for item in cast(list[Any], payload.get("remaining_required_system_ids", []))
+            int(item) for item in cast(list[Any], payload.get("remaining_required_system_ids", []))
         ),
         max_simultaneous_contracts=(
             int(payload["max_simultaneous_contracts"])

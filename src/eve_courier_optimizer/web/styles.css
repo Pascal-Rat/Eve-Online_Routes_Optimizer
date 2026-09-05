@@ -588,3 +588,12 @@ footer { display: flex; justify-content: space-between; gap: 20px; width: min(15
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; }
 }
+
+.commitment-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .75rem 0; border-bottom: 1px solid var(--line); }
+.commitment-row span { overflow-wrap: anywhere; }
+.commitment-row button { flex-shrink: 0; }
+.horizon-extension { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin: 1rem 0; }
+.horizon-extension input { width: 6rem; }
+.horizon-extension small { flex-basis: 100%; color: var(--muted); }
+#cancel-job { margin-top: 1rem; }
+@media (max-width: 600px) { .commitment-row { align-items: flex-start; flex-direction: column; } }
