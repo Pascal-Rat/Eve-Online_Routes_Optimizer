@@ -5,6 +5,20 @@ CI **proof regression**; the real NPC-Empire observation is the canonical **perf
 Both exercise preparation, gate-threat filtering, CP-SAT, certificates and independent feasibility
 verification without letting a moving contract market invalidate comparisons between code changes.
 
+For harder solver mechanics, the opt-in `benchmarks.run_stress` runner adds eight stress
+profiles and compares incumbent reward, rigorous ceiling, and actual elapsed time across budgets
+and seeds. Run `python -m benchmarks.run_stress --time-limit 30 --seed 17 --output results.jsonl`.
+The time limit is the full-event fallback budget; decomposition and model construction are additional.
+Output includes the complete solver configuration, Python source hash, runner hash, versions, and
+mathematical input fingerprint. Use the same runner with each solver checkout, and run comparisons
+sequentially to avoid CPU contention. Stress cases permit open proofs; they do not replace the exact
+golden-reward checks below.
+
+The opt-in `benchmarks.explore_avenues` runner compares route reconstruction, lifted packing,
+and cumulative propagation. Its records include adapter hashes. Run
+`python -m benchmarks.explore_avenues repair_both --time-limit 30` for the cumulative experiment.
+`benchmarks.probe_solver_avenues` separately measures restricted exact neighborhoods.
+
 ## Why the universe is frozen
 
 A live ESI benchmark is not repeatable: contracts disappear, pagination moves, prices change, and

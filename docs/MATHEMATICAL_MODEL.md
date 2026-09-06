@@ -319,9 +319,9 @@ R=R^*
 $$
 
 and performs a bounded exact secondary solve minimizing $t_e$. On the decomposition path the
-master-optimal contract set is fixed as well. This makes “maximize reward, then prefer the faster
-equally rewarding route” a true lexicographic objective. The reward proof survives even if the
-secondary time minimization stops early.
+reward-optimal contract set is fixed as well: duration is refined within that selection, without a
+global fastest-route claim across other reward ties. The complete fallback can search all selections
+at the proven reward. The reward proof survives even if secondary time minimization stops early.
 
 ## 8. Safe preprocessing
 
@@ -362,11 +362,14 @@ with the true courier problem, so they can lower an upper bound without lowering
 For two optional contracts $i,j$, there are exactly six event orders respecting both pickup-before-
 delivery precedences. The preprocessor evaluates all six with exact metric-closure travel. It keeps
 only projected orders that satisfy the two contracts' cargo use, optional simultaneous-parcel cap,
-and rolling collateral budget. This projection deliberately starts with no active cargo/parcels or
+rolling collateral budget, pickup expiry and delivery deadlines. Rolling deadlines are measured
+from pickup arrival; locked deadlines are absolute. Removing other events cannot delay a pickup
+or increase the time between pickup and delivery, so these checks remain necessary conditions.
+This projection deliberately starts with no active cargo/parcels or
 rolling collateral and omits every other contract, mandatory action and required waypoint, making
 it optimistic relative to a real route. Locked collateral is checked directly against $B_0$.
 
-If even this optimistic two-contract problem cannot finish within $H$, or the two contracts cannot
+If even this optimistic two-contract problem cannot meet its deadlines and finish within $H$, or the two contracts cannot
 fit locked collateral, no exact route can select both. The model may therefore add
 
 $$
@@ -397,6 +400,7 @@ It chooses one metric-closure path through the visited systems, retains total se
 session horizon, loop/fixed terminal, mandatory endpoint systems, locked collateral and the valid
 pair/clique cuts above. It intentionally drops global pickup/delivery order, global cargo state,
 global simultaneous-parcel state, rolling collateral state and individual contract deadlines.
+Necessary transport-work inequalities below retain aggregate information about those resources.
 
 Every exact courier route maps to a feasible relaxation route: erase the dropped resource/order
 requirements, collapse repeated endpoint-system visits, and shortcut between retained systems with
@@ -414,22 +418,28 @@ bound. If no valid bound is available, the extra ceiling is simply omitted.
 
 ### Logic-based master/exact decomposition
 
-For at least 20 optional contracts, v1.5 can use the endpoint-system relaxation as a master rather
-than only as a passive ceiling. Let an `OPTIMAL` master solution select the set $S\subseteq K$ with
-reward $U_M=R^*_{system}$. The program builds a reduced copy of the exact event model containing
+For at least 20 optional contracts, the endpoint-system relaxation is also a selection master.
+Let an `OPTIMAL` or `FEASIBLE` master solution select $S\subseteq K$, with rigorous upper bound
+$U_M$. The program builds a reduced copy of the exact event model containing
 only optional contracts in $S$, while preserving active shipments, required systems, terminal shape,
 all exact time/resource rules and the same metric closure. Positive CP-SAT assumptions force every
 $i\in S$ selected.
 
 If that reduced exact model finds a route $q$, the independent full-problem simulator must accept it.
-Its reward is checked against the integer master objective. Then
+Its reward is checked against the integer master objective. If it meets the tightest retained
+master upper bound, then
 
 $$
-R(q)\le R^*_{exact}\le R^*_{system}=U_M=R(q),
+R(q)\le R^*_{exact}\le U_M=R(q),
 $$
 
 so every quantity is equal and the reward optimum is globally proven without solving the complete
-$2|K|$-event model.
+$2|K|$-event model. Otherwise the verified route becomes an incumbent for the full search, with
+an open proof. A later incomplete master solve cannot erase an earlier valid ceiling.
+If the exact route strictly improves the incumbent reward, its verified lower bound and projected
+route hint also strengthen the next master solve within the remaining decomposition budget.
+Repeated rewards do not trigger another restart. A ceiling matching an existing verified route
+closes immediately without a duplicate oracle solve.
 
 If the exact subproblem instead returns `INFEASIBLE`, CP-SAT can return a sufficient subset $C$ of
 the positive assumptions that caused infeasibility. The crucial monotonicity fact is that optional
@@ -444,8 +454,10 @@ $$
 \sum_{i\in C}x_i\le |C|-1.
 $$
 
-CP-SAT cores are sufficient but need not be minimal. V1.5 tries deletion-based shrinking while the
-subproblem budget remains. A contract leaves the core only after the smaller assumption set is
+CP-SAT cores are sufficient but need not be minimal. The oracle uses satisfaction without an
+objective. After portfolio infeasibility, remaining budget can run single-worker core extraction;
+OR-Tools 9.15 otherwise returns the entire assumption set. Deletion-based shrinking also uses one
+worker. A contract leaves the core only after the smaller assumption set is
 again proven `INFEASIBLE`; `FEASIBLE` or `UNKNOWN` shrink attempts keep the literal. An initial
 `UNKNOWN` exact subproblem creates no cut at all.
 
@@ -455,6 +467,35 @@ default, reduced exact/core work gets at most two seconds per iteration, and the
 phase has a 20-second default envelope. If it does not close, all rigorously valid pair, clique,
 master-bound and learned-core information is attached to the complete exact CP-SAT fallback. These
 are performance budgets, not proof-scope truncations.
+
+### Resource transport work
+
+For capacity $C$, demand $w_i$, direct transport distance $d_i$ and available travel distance $L$,
+every feasible selection satisfies $\sum_i w_i d_i x_i\le CL$. For fixed-finish routes in a
+symmetric metric, use distance potentials $f(s)=J(p,s)$ and their negatives. With
+$\Delta=f(s_f)-f(s_0)$, positive variation gives the stronger necessary inequality
+
+$$
+2\sum_i w_i\max(f(s_i^d)-f(s_i^p),0)x_i \le C(L+\Delta).
+$$
+
+Substitute $\gamma L\le H-\sigma(|A_{events}|+2\sum_i x_i)$ and move mandatory work to the
+right-hand side. Picked cargo starts at the current system; unpicked cargo starts at its pickup.
+Already-accepted rolling collateral starts at the current system regardless of pickup status.
+The inequalities use the available horizon, **not** the master's shortcut circuit length.
+
+Cargo, parcel count and rolling collateral each provide a capacity resource. For cargo and
+rolling collateral, at most $k$ items with demand greater than $C/(k+1)$ fit simultaneously.
+Treating those items as unit demand with capacity $k$ gives additional valid work inequalities;
+the implementation generates $k=1,2,3$. These capture some indivisibility missed by fractional
+resource work. Redundant rows are deduplicated and GCD-normalized; oversized rows are omitted.
+
+Cargo and rolling collateral also use a dual-feasible packing transform: for a threshold
+$0<t\le C/2$, discard demands below $t$, raise demands above $C-t$ to $C$, and retain other
+demands. Every feasible co-carried packing still fits after transformation. The same work
+inequalities therefore apply to these transformed demands. The implementation uses
+$t=\lfloor C/k\rfloor$ for $k=2,3,4$, omitting zero thresholds. Regression tests enumerate small
+integer packings and protect the exact-fit boundaries of this transform.
 
 ## 10. Complexity
 
@@ -476,9 +517,12 @@ $$
 
 where $|A_{events}|$ is the number of mandatory pickup/delivery actions already in execution state,
 also exposes the unavoidable action-service time directly to CP-SAT propagation. A greedy feasible
-route is supplied as a nonbinding CP-SAT hint, and jump closures/concrete paths are cached by exact
-routing policy. None of these changes deletes a feasible contract combination, so they preserve the
-proof. The explicit `max_candidates` cap remains the only performance option that truncates scope.
+route is improved by precedence-respecting insertion, multiple rebuild orders and one
+contract-removal/repair pass, independently verified, and supplied as a
+complete CP-SAT hint. Its verified reward is an objective lower bound; its route remains available
+even if CP-SAT times out before recording an assignment. Jump closures/concrete paths are cached by
+exact routing policy. No better solution is removed. The explicit `max_candidates` cap remains the
+only performance option that truncates scope.
 The pair/clique cuts, endpoint-system master and exact-core feedback described above add stronger
 problem-specific proof structure on dense cases. See [CP_SAT_GUIDE.md](CP_SAT_GUIDE.md) and
 [BENCHMARKS.md](BENCHMARKS.md).

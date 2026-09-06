@@ -6,6 +6,13 @@ notes when tagged versions are published.
 
 ## Unreleased
 
+- Strengthen master and exact search with capacity-weighted transport work, distance-potential
+  inequalities, and indivisible-parcel counts. Preserve independently verified routes through search
+  timeouts, add shared-haul insertion, and provide complete route hints and objective lower bounds.
+- Test feasible master selections before their bound closes and retain the tightest proven ceiling.
+  Feed improved verified routes back into the master as stronger lower bounds and route hints.
+  Correct OR-Tools assumption-core extraction to use single-worker satisfaction within its budget.
+- Add diverse, reproducible stress benchmarks and a mathematical solver study with measured ablations.
 - Keep accepted-shipment and route-progress controls available after infeasible replans. Allow real
   progress after the planning horizon and explicit horizon extension while preserving deadlines.
 - Use current departure time in the web planner, revalidate arming, and enforce cargo on all pickups.

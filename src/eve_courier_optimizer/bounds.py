@@ -40,6 +40,10 @@ class SystemRelaxationMaster:
     contract_is_selected: dict[int, cp_model.IntVar]
     total_reward_units: cp_model.IntVar
     routed_systems: int
+    system_id_by_node_id: dict[int, int | None]
+    arc_is_used: dict[tuple[int, int], cp_model.IntVar]
+    system_is_visited: dict[int, cp_model.IntVar]
+    system_is_skipped: dict[int, cp_model.IntVar]
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +102,188 @@ def _collect_relaxation_system_ids(
         candidate_system_ids.add(constraints.terminal_system_id)
         mandatory_system_ids.add(constraints.terminal_system_id)
     return candidate_system_ids, mandatory_system_ids
+
+
+@dataclass(frozen=True, slots=True)
+class _ResourceWorkSpec:
+    capacity: int
+    resource: str
+    threshold: int | None = None
+
+    def demand(self, value: int) -> int:
+        return value if self.threshold is None else int(value > self.threshold)
+
+
+class _LiftedResourceWorkSpec(_ResourceWorkSpec):
+    """Integer form of the dual-feasible U(epsilon) packing transform.
+
+    For 0 < t <= C/2, discard loads below t and raise loads above C-t to C. A feasible
+    packing with a raised load has only discarded companions; without one, every transformed
+    load is at most its original size. Thus transformed co-carried demand still never exceeds C.
+    Strict inequalities preserve exact-fit packings at both boundaries.
+    """
+
+    def demand(self, value: int) -> int:
+        assert self.threshold is not None
+        if value < self.threshold:
+            return 0
+        return self.capacity if value > self.capacity - self.threshold else value
+
+
+def _resource_work_specs(prepared: PreparedProblem) -> list[_ResourceWorkSpec]:
+    c = prepared.problem.constraints
+    resources = [(c.cargo_capacity_units, "volume")]
+    if c.max_simultaneous_contracts is not None:
+        resources.append((c.max_simultaneous_contracts, "parcels"))
+    if c.collateral_mode is CollateralMode.ROLLING:
+        resources.append((c.collateral_budget_units, "collateral"))
+    capacity_specs = [_ResourceWorkSpec(capacity, resource) for capacity, resource in resources]
+    # At most k items larger than C/(k+1) fit simultaneously. Their count is another
+    # valid transport resource, capturing indivisible parcels that fractional volume misses.
+    capacity_specs.extend(
+        _ResourceWorkSpec(k, resource, capacity // (k + 1))
+        for capacity, resource in resources
+        if capacity > 0 and resource != "parcels"
+        for k in (1, 2, 3)
+    )
+    capacity_specs.extend(
+        _LiftedResourceWorkSpec(capacity, resource, capacity // k)
+        for capacity, resource in resources
+        if resource != "parcels"
+        for k in (2, 3, 4)
+        if capacity // k > 0
+    )
+    return capacity_specs
+
+
+def add_resource_work_bounds(
+    model: cp_model.CpModel,
+    prepared: PreparedProblem,
+    selected: dict[int, cp_model.IntVar],
+) -> int:
+    """Bound transport work by capacity and available travel, without fixing a route.
+
+    For any 1-Lipschitz potential f, an item from p to d needs at least max(f(d)-f(p), 0)
+    positive progress. At every instant the total carried resource is at most C. For a fixed
+    terminal, positive progress of the whole route is at most (travel + f(end)-f(start))/2.
+    This gives a necessary selection inequality even when the system master shortcuts revisits.
+    Crucially we use the AVAILABLE travel budget, not the master's shorter selected circuit.
+    """
+    problem = prepared.problem
+    c = problem.constraints
+    service = c.travel.service_seconds
+    jump_seconds = c.travel.seconds_per_jump
+    mandatory_service = _mandatory_action_count(prepared) * service
+    symmetric_metric = all(
+        distance == prepared.jump_matrix.get((destination, source))
+        for (source, destination), distance in prepared.jump_matrix.items()
+    )
+    pivots = sorted(
+        {c.start_system_id}
+        | {
+            endpoint
+            for item in problem.contracts
+            for endpoint in (item.origin_system_id, item.destination_system_id)
+        }
+    )
+    count = 0
+    seen: set[tuple[tuple[int, ...], int]] = set()
+    ids = tuple(selected)
+    for spec in _resource_work_specs(prepared):
+        capacity, resource = spec.capacity, spec.resource
+        if capacity <= 0:
+            continue
+        # (selection ID, demand, source, destination); None denotes a mandatory shipment.
+        shipments: list[tuple[int | None, int, int, int]] = []
+        for item in problem.contracts:
+            demand = (
+                item.contract.volume_units
+                if resource == "volume"
+                else item.contract.collateral_units
+                if resource == "collateral"
+                else 1
+            )
+            demand = spec.demand(demand)
+            shipments.append(
+                (
+                    item.contract.contract_id,
+                    demand,
+                    item.origin_system_id,
+                    item.destination_system_id,
+                )
+            )
+        for active in problem.active_shipments:
+            item = active.contract
+            demand = (
+                item.contract.volume_units
+                if resource == "volume"
+                else item.contract.collateral_units
+                if resource == "collateral"
+                else 1
+            )
+            origin = (
+                c.start_system_id
+                if active.picked or resource == "collateral"
+                else item.origin_system_id
+            )
+            demand = spec.demand(demand)
+            shipments.append((None, demand, origin, item.destination_system_id))
+        divisor = math.gcd(capacity, *(row[1] for row in shipments))
+        scaled_capacity = capacity // divisor
+        # Direct metric transport work also applies to fully open routes.
+        distances: list[tuple[int, int, list[int | None]]] = [
+            (1, 0, [prepared.jump_matrix.get((s, d)) for _, _, s, d in shipments])
+        ]
+        if c.terminal_system_id is not None and symmetric_metric:
+            for pivot in pivots:
+                start = prepared.jump_matrix.get((pivot, c.start_system_id))
+                finish = prepared.jump_matrix.get((pivot, c.terminal_system_id))
+                values = [
+                    (prepared.jump_matrix.get((pivot, s)), prepared.jump_matrix.get((pivot, d)))
+                    for _, _, s, d in shipments
+                ]
+                if (
+                    start is None
+                    or finish is None
+                    or any(s is None or d is None for s, d in values)
+                ):
+                    continue
+                for sign in (1, -1):
+                    progress: list[int | None] = [
+                        max(0, sign * (d - s)) for s, d in values if s is not None and d is not None
+                    ]
+                    distances.append((2, sign * (finish - start), progress))
+        for multiplier, terminal_delta, travel in distances:
+            if any(value is None for value in travel):
+                continue
+            coefficients = {i: 2 * service * scaled_capacity for i in ids}
+            mandatory_work = 0
+            for (contract_id, demand, _, _), distance in zip(shipments, travel, strict=True):
+                assert distance is not None
+                work = multiplier * (demand // divisor) * distance * jump_seconds
+                if contract_id is None:
+                    mandatory_work += work
+                else:
+                    coefficients[contract_id] += work
+            rhs = (
+                scaled_capacity
+                * (c.horizon_seconds - mandatory_service + terminal_delta * jump_seconds)
+                - mandatory_work
+            )
+            divisor_row = math.gcd(*(coefficients.values()), rhs)
+            if divisor_row:
+                coefficients = {i: value // divisor_row for i, value in coefficients.items()}
+                rhs //= divisor_row
+            signature = (tuple(coefficients[i] for i in ids), rhs)
+            if signature in seen or sum(coefficients.values()) <= rhs:
+                continue
+            # Oversized optional strengthening must never make a valid base model overflow.
+            if sum(abs(value) for value in coefficients.values()) + abs(rhs) >= 2**62:
+                continue
+            seen.add(signature)
+            model.add(sum(coefficients[i] * selected[i] for i in ids) <= rhs)
+            count += 1
+    return count
 
 
 def build_system_relaxation_master(
@@ -200,6 +386,8 @@ def build_system_relaxation_master(
         model.add(system_is_skipped + system_is_visited[system_id] == 1)
         circuit_arc_definitions.append((node_id, node_id, system_is_skipped))
 
+    arc_is_used = {(u, v): literal for u, v, literal in circuit_arc_definitions}
+    skipped = {system: arc_is_used[node, node] for system, node in node_id_by_system_id.items()}
     travel_time_terms: list[cp_model.LinearExpr] = []
     node_ids = tuple(sorted(system_id_by_node_id))
     for source_node_id in node_ids:
@@ -223,6 +411,7 @@ def build_system_relaxation_master(
                     continue
                 jump_count = possible_jump_count
             is_arc_used = model.new_bool_var(f"relax_arc_{source_node_id}_{destination_node_id}")
+            arc_is_used[source_node_id, destination_node_id] = is_arc_used
             circuit_arc_definitions.append((source_node_id, destination_node_id, is_arc_used))
             travel_time_seconds = jump_count * constraints.travel.seconds_per_jump
             if travel_time_seconds:
@@ -263,6 +452,7 @@ def build_system_relaxation_master(
             for contract in problem.contracts
         )
     )
+    add_resource_work_bounds(model, prepared, contract_is_selected)
     model.maximize(total_reward_units)
 
     validation_error = model.validate()
@@ -273,7 +463,45 @@ def build_system_relaxation_master(
         contract_is_selected=contract_is_selected,
         total_reward_units=total_reward_units,
         routed_systems=len(candidate_system_ids),
+        system_id_by_node_id=system_id_by_node_id,
+        arc_is_used=arc_is_used,
+        system_is_visited=system_is_visited,
+        system_is_skipped=skipped,
     )
+
+
+def hint_system_relaxation_master(
+    master: SystemRelaxationMaster,
+    contract_ids: tuple[int, ...],
+    system_order: tuple[int, ...],
+    reward: int,
+) -> None:
+    """Shortcut an independently feasible route into a complete master hint."""
+    node_by_system = {
+        system: node for node, system in master.system_id_by_node_id.items() if node >= 2
+    }
+    nodes = [0]
+    for system in system_order:
+        node = node_by_system.get(system)
+        if node is not None and node not in nodes:
+            nodes.append(node)
+    nodes.append(1)
+    arcs = set(zip(nodes, nodes[1:], strict=False)) | {(1, 0)}
+    if not arcs <= master.arc_is_used.keys():
+        raise RuntimeError("verified incumbent cannot be projected into the system master")
+    master.model.clear_hints()  # type: ignore[no-untyped-call]
+    for contract_id, variable in master.contract_is_selected.items():
+        master.model.add_hint(variable, int(contract_id in contract_ids))
+    for system, variable in master.system_is_visited.items():
+        visited = int(node_by_system[system] in nodes)
+        master.model.add_hint(variable, visited)
+        master.model.add_hint(master.system_is_skipped[system], 1 - visited)
+    for arc, variable in master.arc_is_used.items():
+        # Optional self-loops are already hinted through system_is_skipped.
+        if arc[0] != arc[1]:
+            master.model.add_hint(variable, int(arc in arcs))
+    master.model.add_hint(master.total_reward_units, reward)
+    master.model.add(master.total_reward_units >= reward)
 
 
 def add_proven_infeasible_selection_cut(
@@ -380,7 +608,12 @@ def _pair_minimum_seconds(
     first: RoutableContract,
     second: RoutableContract,
 ) -> int | None:
-    """Optimistic resource-feasible duration for servicing exactly two contracts."""
+    """Optimistic resource/deadline-feasible duration for exactly two contracts.
+
+    Removing other actions and shortcutting travel cannot delay a pickup or increase the time
+    between its pickup and delivery. Thus both absolute and rolling deadlines survive projection
+    onto these four events. Required waypoints and active shipments are safely omitted here.
+    """
 
     constraints = prepared.problem.constraints
     contracts = (first, second)
@@ -397,7 +630,8 @@ def _pair_minimum_seconds(
     minimum_route_seconds: int | None = None
     for event_order in valid_event_orders:
         current_system_id = constraints.start_system_id
-        total_jump_count = 0
+        elapsed = 0
+        pickup_times: dict[int, int] = {}
         cargo_load_units = 0
         active_contract_count = 0
         locked_collateral_units = 0
@@ -433,7 +667,24 @@ def _pair_minimum_seconds(
             if leg_jump_count is None:
                 is_feasible = False
                 break
-            total_jump_count += leg_jump_count
+            arrival = elapsed + leg_jump_count * constraints.travel.seconds_per_jump
+            elapsed = arrival + constraints.travel.service_seconds
+            if is_pickup:
+                pickup_times[event_index // 2] = arrival
+                if (
+                    constraints.collateral_mode is CollateralMode.ROLLING
+                    and arrival
+                    >= (contract.contract.date_expired - constraints.snapshot_time).total_seconds()
+                ):
+                    is_feasible = False
+                    break
+            else:
+                deadline = contract.contract.days_to_complete * 86_400
+                if constraints.collateral_mode is CollateralMode.ROLLING:
+                    deadline += pickup_times[event_index // 2]
+                if elapsed > deadline:
+                    is_feasible = False
+                    break
             current_system_id = target_system_id
         terminal_system_id = constraints.terminal_system_id
         if is_feasible and terminal_system_id is not None:
@@ -441,16 +692,10 @@ def _pair_minimum_seconds(
             if finish_jump_count is None:
                 is_feasible = False
             else:
-                total_jump_count += finish_jump_count
+                elapsed += finish_jump_count * constraints.travel.seconds_per_jump
         if is_feasible:
-            route_time_seconds = (
-                total_jump_count * constraints.travel.seconds_per_jump
-                + 4 * constraints.travel.service_seconds
-            )
             minimum_route_seconds = (
-                route_time_seconds
-                if minimum_route_seconds is None
-                else min(minimum_route_seconds, route_time_seconds)
+                elapsed if minimum_route_seconds is None else min(minimum_route_seconds, elapsed)
             )
     return minimum_route_seconds
 
