@@ -14,6 +14,11 @@ mathematical input fingerprint. Use the same runner with each solver checkout, a
 sequentially to avoid CPU contention. Stress cases permit open proofs; they do not replace the exact
 golden-reward checks below.
 
+The opt-in `benchmarks.explore_avenues` runner compares route reconstruction, lifted packing,
+and cumulative propagation. Its records include adapter hashes. Run
+`python -m benchmarks.explore_avenues repair_both --time-limit 30` for the cumulative experiment.
+`benchmarks.probe_solver_avenues` separately measures restricted exact neighborhoods.
+
 ## Why the universe is frozen
 
 A live ESI benchmark is not repeatable: contracts disappear, pagination moves, prices change, and

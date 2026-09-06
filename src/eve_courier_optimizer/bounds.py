@@ -104,6 +104,58 @@ def _collect_relaxation_system_ids(
     return candidate_system_ids, mandatory_system_ids
 
 
+@dataclass(frozen=True, slots=True)
+class _ResourceWorkSpec:
+    capacity: int
+    resource: str
+    threshold: int | None = None
+
+    def demand(self, value: int) -> int:
+        return value if self.threshold is None else int(value > self.threshold)
+
+
+class _LiftedResourceWorkSpec(_ResourceWorkSpec):
+    """Integer form of the dual-feasible U(epsilon) packing transform.
+
+    For 0 < t <= C/2, discard loads below t and raise loads above C-t to C. A feasible
+    packing with a raised load has only discarded companions; without one, every transformed
+    load is at most its original size. Thus transformed co-carried demand still never exceeds C.
+    Strict inequalities preserve exact-fit packings at both boundaries.
+    """
+
+    def demand(self, value: int) -> int:
+        assert self.threshold is not None
+        if value < self.threshold:
+            return 0
+        return self.capacity if value > self.capacity - self.threshold else value
+
+
+def _resource_work_specs(prepared: PreparedProblem) -> list[_ResourceWorkSpec]:
+    c = prepared.problem.constraints
+    resources = [(c.cargo_capacity_units, "volume")]
+    if c.max_simultaneous_contracts is not None:
+        resources.append((c.max_simultaneous_contracts, "parcels"))
+    if c.collateral_mode is CollateralMode.ROLLING:
+        resources.append((c.collateral_budget_units, "collateral"))
+    capacity_specs = [_ResourceWorkSpec(capacity, resource) for capacity, resource in resources]
+    # At most k items larger than C/(k+1) fit simultaneously. Their count is another
+    # valid transport resource, capturing indivisible parcels that fractional volume misses.
+    capacity_specs.extend(
+        _ResourceWorkSpec(k, resource, capacity // (k + 1))
+        for capacity, resource in resources
+        if capacity > 0 and resource != "parcels"
+        for k in (1, 2, 3)
+    )
+    capacity_specs.extend(
+        _LiftedResourceWorkSpec(capacity, resource, capacity // k)
+        for capacity, resource in resources
+        if resource != "parcels"
+        for k in (2, 3, 4)
+        if capacity // k > 0
+    )
+    return capacity_specs
+
+
 def add_resource_work_bounds(
     model: cp_model.CpModel,
     prepared: PreparedProblem,
@@ -119,22 +171,6 @@ def add_resource_work_bounds(
     """
     problem = prepared.problem
     c = problem.constraints
-    resources = [(c.cargo_capacity_units, "volume")]
-    if c.max_simultaneous_contracts is not None:
-        resources.append((c.max_simultaneous_contracts, "parcels"))
-    if c.collateral_mode is CollateralMode.ROLLING:
-        resources.append((c.collateral_budget_units, "collateral"))
-    capacity_specs: list[tuple[int, str, int | None]] = [
-        (capacity, resource, None) for capacity, resource in resources
-    ]
-    # At most k items larger than C/(k+1) fit simultaneously. Their count is another
-    # valid transport resource, capturing indivisible parcels that fractional volume misses.
-    capacity_specs.extend(
-        (k, resource, capacity // (k + 1))
-        for capacity, resource in resources
-        if capacity > 0 and resource != "parcels"
-        for k in (1, 2, 3)
-    )
     service = c.travel.service_seconds
     jump_seconds = c.travel.seconds_per_jump
     mandatory_service = _mandatory_action_count(prepared) * service
@@ -153,7 +189,8 @@ def add_resource_work_bounds(
     count = 0
     seen: set[tuple[tuple[int, ...], int]] = set()
     ids = tuple(selected)
-    for capacity, resource, threshold in capacity_specs:
+    for spec in _resource_work_specs(prepared):
+        capacity, resource = spec.capacity, spec.resource
         if capacity <= 0:
             continue
         # (selection ID, demand, source, destination); None denotes a mandatory shipment.
@@ -166,8 +203,7 @@ def add_resource_work_bounds(
                 if resource == "collateral"
                 else 1
             )
-            if threshold is not None:
-                demand = int(demand > threshold)
+            demand = spec.demand(demand)
             shipments.append(
                 (
                     item.contract.contract_id,
@@ -190,8 +226,7 @@ def add_resource_work_bounds(
                 if active.picked or resource == "collateral"
                 else item.origin_system_id
             )
-            if threshold is not None:
-                demand = int(demand > threshold)
+            demand = spec.demand(demand)
             shipments.append((None, demand, origin, item.destination_system_id))
         divisor = math.gcd(capacity, *(row[1] for row in shipments))
         scaled_capacity = capacity // divisor
@@ -573,7 +608,12 @@ def _pair_minimum_seconds(
     first: RoutableContract,
     second: RoutableContract,
 ) -> int | None:
-    """Optimistic resource-feasible duration for servicing exactly two contracts."""
+    """Optimistic resource/deadline-feasible duration for exactly two contracts.
+
+    Removing other actions and shortcutting travel cannot delay a pickup or increase the time
+    between its pickup and delivery. Thus both absolute and rolling deadlines survive projection
+    onto these four events. Required waypoints and active shipments are safely omitted here.
+    """
 
     constraints = prepared.problem.constraints
     contracts = (first, second)
@@ -590,7 +630,8 @@ def _pair_minimum_seconds(
     minimum_route_seconds: int | None = None
     for event_order in valid_event_orders:
         current_system_id = constraints.start_system_id
-        total_jump_count = 0
+        elapsed = 0
+        pickup_times: dict[int, int] = {}
         cargo_load_units = 0
         active_contract_count = 0
         locked_collateral_units = 0
@@ -626,7 +667,24 @@ def _pair_minimum_seconds(
             if leg_jump_count is None:
                 is_feasible = False
                 break
-            total_jump_count += leg_jump_count
+            arrival = elapsed + leg_jump_count * constraints.travel.seconds_per_jump
+            elapsed = arrival + constraints.travel.service_seconds
+            if is_pickup:
+                pickup_times[event_index // 2] = arrival
+                if (
+                    constraints.collateral_mode is CollateralMode.ROLLING
+                    and arrival
+                    >= (contract.contract.date_expired - constraints.snapshot_time).total_seconds()
+                ):
+                    is_feasible = False
+                    break
+            else:
+                deadline = contract.contract.days_to_complete * 86_400
+                if constraints.collateral_mode is CollateralMode.ROLLING:
+                    deadline += pickup_times[event_index // 2]
+                if elapsed > deadline:
+                    is_feasible = False
+                    break
             current_system_id = target_system_id
         terminal_system_id = constraints.terminal_system_id
         if is_feasible and terminal_system_id is not None:
@@ -634,16 +692,10 @@ def _pair_minimum_seconds(
             if finish_jump_count is None:
                 is_feasible = False
             else:
-                total_jump_count += finish_jump_count
+                elapsed += finish_jump_count * constraints.travel.seconds_per_jump
         if is_feasible:
-            route_time_seconds = (
-                total_jump_count * constraints.travel.seconds_per_jump
-                + 4 * constraints.travel.service_seconds
-            )
             minimum_route_seconds = (
-                route_time_seconds
-                if minimum_route_seconds is None
-                else min(minimum_route_seconds, route_time_seconds)
+                elapsed if minimum_route_seconds is None else min(minimum_route_seconds, elapsed)
             )
     return minimum_route_seconds
 

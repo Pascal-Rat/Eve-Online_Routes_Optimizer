@@ -1,0 +1,324 @@
+"""Opt-in solver experiments; install one variant before running the standard stress runner.
+
+Usage: python -m benchmarks.explore_avenues VARIANT [run_stress arguments].
+These adapters never truncate the exact candidate set. Keep experiments separate from defaults.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import sys
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
+
+from ortools.sat.python import cp_model
+
+from eve_courier_optimizer import bounds, solver
+from eve_courier_optimizer.construction import insert_additional_contracts
+from eve_courier_optimizer.domain import ActionKind, CollateralMode
+from eve_courier_optimizer.planning import PreparedProblem, SingleContractScore
+from eve_courier_optimizer.sde import UniverseGraph
+from eve_courier_optimizer.verification import (
+    PlannedAction,
+    PlannedVisit,
+    PlannedWaypoint,
+    SimulationResult,
+    simulate_and_verify,
+)
+
+from .run_stress import main
+
+VARIANTS = (
+    "baseline",
+    "cumulative_time",
+    "cumulative_order",
+    "cumulative_both",
+    "rebuild",
+    "repair",
+    "lifted",
+    "repair_time",
+    "repair_order",
+    "repair_both",
+    "repair_lifted",
+)
+
+
+class LiftedResource(bounds._ResourceWorkSpec):
+    """A dual-feasible packing transform: discard tiny loads and round large loads up."""
+
+    def demand(self, value: int) -> int:
+        assert self.threshold is not None
+        if value < self.threshold:
+            return 0
+        return self.capacity if value > self.capacity - self.threshold else value
+
+
+def add_cumulative_resources(
+    route: solver._RouteModel, prepared: PreparedProblem, axes: tuple[str, ...]
+) -> None:
+    c = prepared.problem.constraints
+    action_nodes = {
+        (e.action_kind, e.contract_id): e.node_id for e in route.events if e.action_kind
+    }
+    active = {a.contract.contract.contract_id: a for a in prepared.problem.active_shipments}
+    items = (*prepared.problem.contracts, *(a.contract for a in active.values()))
+    for axis in axes:
+        positions = route.state_variables[axis]
+        limit = c.horizon_seconds if axis == "arrival" else len(route.events)
+        cached: dict[tuple[int, int], cp_model.IntervalVar] = {}
+        resources = [("cargo", c.cargo_capacity_units)]
+        if c.max_simultaneous_contracts is not None:
+            resources.append(("parcels", c.max_simultaneous_contracts))
+        if c.collateral_mode is CollateralMode.ROLLING:
+            resources.append(("collateral", c.collateral_budget_units))
+        for resource, capacity in resources:
+            intervals, demands = [], []
+            for item in items:
+                contract = item.contract
+                demand = (
+                    contract.volume_units
+                    if resource == "cargo"
+                    else (contract.collateral_units if resource == "collateral" else 1)
+                )
+                if not demand:
+                    continue
+                shipment = active.get(contract.contract_id)
+                start = (
+                    0
+                    if shipment and (shipment.picked or resource == "collateral")
+                    else (action_nodes[ActionKind.PICKUP, contract.contract_id])
+                )
+                end = action_nodes[ActionKind.DELIVERY, contract.contract_id]
+                if (start, end) not in cached:
+                    duration = route.model.new_int_var(0, limit, f"hold_{axis}_{start}_{end}")
+                    if shipment:
+                        interval = route.model.new_interval_var(
+                            positions[start],
+                            duration,
+                            positions[end],
+                            f"holding_{axis}_{start}_{end}",
+                        )
+                    else:
+                        interval = route.model.new_optional_interval_var(
+                            positions[start],
+                            duration,
+                            positions[end],
+                            route.contract_is_selected[contract.contract_id],
+                            f"holding_{axis}_{start}_{end}",
+                        )
+                    cached[start, end] = interval
+                intervals.append(cached[start, end])
+                demands.append(demand)
+            if intervals:
+                route.model.add_cumulative(intervals, demands, capacity)
+
+
+def rebuild_incumbent(
+    prepared: PreparedProblem,
+    graph: UniverseGraph,
+    visits: tuple[PlannedVisit, ...],
+    simulation: SimulationResult,
+    *,
+    repair: bool,
+) -> tuple[tuple[PlannedVisit, ...], SimulationResult]:
+    best = insert_additional_contracts(prepared, graph, visits, simulation)
+    if prepared.problem.active_shipments or not best[1].report.valid:
+        return best
+    c = prepared.problem.constraints
+    # An empty-contract route retains all mandatory waypoints and terminal travel.
+    empty = replace(prepared, problem=replace(prepared.problem, contracts=()), scores=())
+    empty_visits = solver._build_greedy_route_hint(empty)
+    empty_simulation = simulate_and_verify(prepared.problem, graph, empty_visits, ())
+    if not empty_simulation.report.valid:
+        return best
+    score_orders = (
+        tuple(
+            sorted(
+                prepared.scores,
+                key=lambda s: (
+                    -s.reward_per_hour_isk,
+                    -s.contract.contract.reward_units,
+                    s.contract.contract.contract_id,
+                ),
+            )
+        ),
+        tuple(
+            sorted(
+                prepared.scores,
+                key=lambda s: (-s.contract.contract.reward_units, s.contract.contract.contract_id),
+            )
+        ),
+        tuple(
+            sorted(
+                prepared.scores,
+                key=lambda s: (
+                    -s.contract.contract.reward_units
+                    / max(1, s.contract.contract.collateral_units),
+                    s.contract.contract.contract_id,
+                ),
+            )
+        ),
+    )
+
+    # The existing insertion routine sorts by score. Override just the heuristic scores in a
+    # temporary PreparedProblem; the mathematical problem and exact model remain unchanged.
+    def insert_in_order(
+        order: tuple[SingleContractScore, ...],
+        initial: tuple[PlannedVisit, ...],
+        sim: SimulationResult,
+    ) -> tuple[tuple[PlannedVisit, ...], SimulationResult]:
+        scores = tuple(
+            replace(s, reward_per_hour_isk=float(len(order) - i)) for i, s in enumerate(order)
+        )
+        return insert_additional_contracts(replace(prepared, scores=scores), graph, initial, sim)
+
+    def quality(result: tuple[tuple[PlannedVisit, ...], SimulationResult]) -> tuple[int, int]:
+        return result[1].total_reward_units, -result[1].finish_seconds
+
+    for order in score_orders:
+        candidate = insert_in_order(order, empty_visits, empty_simulation)
+        if quality(candidate) > quality(best):
+            best = candidate
+    if not repair:
+        return best
+    # One full single-contract removal/repair neighborhood of the best constructed route.
+    # Preserve a removed action's required endpoint as a zero-service waypoint.
+    seed_visits = best[0]
+    selected_ids = {v.contract_id for v in seed_visits if isinstance(v, PlannedAction)}
+    items = {i.contract.contract_id: i for i in prepared.problem.contracts}
+    for removed in sorted(selected_ids):
+        reduced: list[PlannedVisit] = []
+        for visit in seed_visits:
+            if isinstance(visit, PlannedAction) and visit.contract_id == removed:
+                item = items[removed]
+                system = (
+                    item.origin_system_id
+                    if visit.action is ActionKind.PICKUP
+                    else item.destination_system_id
+                )
+                if system in c.required_system_ids:
+                    reduced.append(PlannedWaypoint(system))
+            else:
+                reduced.append(visit)
+        sim = simulate_and_verify(
+            prepared.problem, graph, tuple(reduced), tuple(sorted(selected_ids - {removed}))
+        )
+        if sim.report.valid:
+            for order in score_orders[:2]:
+                candidate = insert_in_order(order, tuple(reduced), sim)
+                if quality(candidate) > quality(best):
+                    best = candidate
+    return best
+
+
+def install_variant(variant: str) -> None:
+    """Ablate construction/packing on the current solver; keep deadline checks in all variants."""
+    production_specs = bounds._resource_work_specs
+    bounds._resource_work_specs = lambda prepared: [
+        spec
+        for spec in production_specs(prepared)
+        if not isinstance(spec, bounds._LiftedResourceWorkSpec)
+    ]
+
+    def basic(
+        p: PreparedProblem,
+        g: UniverseGraph,
+        v: tuple[PlannedVisit, ...],
+        s: SimulationResult,
+        *,
+        restart_visits: tuple[PlannedVisit, ...],
+    ) -> tuple[tuple[PlannedVisit, ...], SimulationResult]:
+        return insert_additional_contracts(p, g, v, s)
+
+    patch.object(solver, "improve_incumbent", basic).start()
+    _configure_variant(variant)
+
+
+def _configure_variant(variant: str) -> None:
+    if variant not in VARIANTS:
+        raise ValueError(f"unknown experiment {variant!r}")
+    if variant.startswith("repair_"):
+        _configure_variant("repair")
+        suffix = variant.removeprefix("repair_")
+        _configure_variant("lifted" if suffix == "lifted" else "cumulative_" + suffix)
+        return
+    if variant == "lifted":
+        original_specs = bounds._resource_work_specs
+
+        def specifications(prepared: PreparedProblem) -> list[bounds._ResourceWorkSpec]:
+            c = prepared.problem.constraints
+            resources = [(c.cargo_capacity_units, "volume")]
+            if c.collateral_mode is CollateralMode.ROLLING:
+                resources.append((c.collateral_budget_units, "collateral"))
+            return original_specs(prepared) + [
+                LiftedResource(capacity, resource, capacity // k)
+                for capacity, resource in resources
+                for k in (2, 3, 4)
+                if capacity // k > 0
+            ]
+
+        bounds._resource_work_specs = specifications
+    if variant.startswith("cumulative_"):
+        axes = (
+            ("arrival", "order")
+            if variant.endswith("both")
+            else ("arrival" if variant.endswith("time") else "order",)
+        )
+        original_build, original_hint = solver._build_model, solver._hint_verified_route
+
+        def build(prepared: PreparedProblem) -> solver._RouteModel:
+            route = original_build(prepared)
+            add_cumulative_resources(route, prepared, axes)
+            return route
+
+        def hint(
+            route: solver._RouteModel,
+            prepared: PreparedProblem,
+            visits: tuple[PlannedVisit, ...],
+            selected_ids: tuple[int, ...],
+        ) -> None:
+            original_hint(route, prepared, visits, selected_ids)
+            assigned = dict(
+                zip(
+                    route.model.proto.solution_hint.vars,
+                    route.model.proto.solution_hint.values,
+                    strict=True,
+                )
+            )
+            for index, variable in enumerate(route.model.proto.variables):
+                if variable.name.startswith("hold_"):
+                    _, axis, start, end = variable.name.split("_")
+                    positions = route.state_variables[axis]
+                    duration = (
+                        assigned[positions[int(end)].index] - assigned[positions[int(start)].index]
+                    )
+                    route.model.add_hint(route.model.get_int_var_from_proto_index(index), duration)
+
+        solver._build_model, solver._hint_verified_route = build, hint
+    if variant in {"rebuild", "repair"}:
+
+        def construct(
+            p: PreparedProblem,
+            g: UniverseGraph,
+            v: tuple[PlannedVisit, ...],
+            s: SimulationResult,
+            *,
+            restart_visits: tuple[PlannedVisit, ...],
+        ) -> tuple[tuple[PlannedVisit, ...], SimulationResult]:
+            return rebuild_incumbent(p, g, v, s, repair=variant == "repair")
+
+        patch.object(solver, "improve_incumbent", construct).start()
+
+
+if __name__ == "__main__":
+    experiment = sys.argv.pop(1)
+    install_variant(experiment)
+    raise SystemExit(
+        main(
+            experiment={
+                "variant": experiment,
+                "adapter_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            }
+        )
+    )

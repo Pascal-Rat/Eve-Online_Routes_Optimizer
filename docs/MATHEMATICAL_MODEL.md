@@ -362,11 +362,14 @@ with the true courier problem, so they can lower an upper bound without lowering
 For two optional contracts $i,j$, there are exactly six event orders respecting both pickup-before-
 delivery precedences. The preprocessor evaluates all six with exact metric-closure travel. It keeps
 only projected orders that satisfy the two contracts' cargo use, optional simultaneous-parcel cap,
-and rolling collateral budget. This projection deliberately starts with no active cargo/parcels or
+rolling collateral budget, pickup expiry and delivery deadlines. Rolling deadlines are measured
+from pickup arrival; locked deadlines are absolute. Removing other events cannot delay a pickup
+or increase the time between pickup and delivery, so these checks remain necessary conditions.
+This projection deliberately starts with no active cargo/parcels or
 rolling collateral and omits every other contract, mandatory action and required waypoint, making
 it optimistic relative to a real route. Locked collateral is checked directly against $B_0$.
 
-If even this optimistic two-contract problem cannot finish within $H$, or the two contracts cannot
+If even this optimistic two-contract problem cannot meet its deadlines and finish within $H$, or the two contracts cannot
 fit locked collateral, no exact route can select both. The model may therefore add
 
 $$
@@ -487,6 +490,13 @@ Treating those items as unit demand with capacity $k$ gives additional valid wor
 the implementation generates $k=1,2,3$. These capture some indivisibility missed by fractional
 resource work. Redundant rows are deduplicated and GCD-normalized; oversized rows are omitted.
 
+Cargo and rolling collateral also use a dual-feasible packing transform: for a threshold
+$0<t\le C/2$, discard demands below $t$, raise demands above $C-t$ to $C$, and retain other
+demands. Every feasible co-carried packing still fits after transformation. The same work
+inequalities therefore apply to these transformed demands. The implementation uses
+$t=\lfloor C/k\rfloor$ for $k=2,3,4$, omitting zero thresholds. Regression tests enumerate small
+integer packings and protect the exact-fit boundaries of this transform.
+
 ## 10. Complexity
 
 This is a prize-collecting pickup-and-delivery routing problem with time/resource constraints and is
@@ -507,7 +517,8 @@ $$
 
 where $|A_{events}|$ is the number of mandatory pickup/delivery actions already in execution state,
 also exposes the unavoidable action-service time directly to CP-SAT propagation. A greedy feasible
-route is improved by precedence-respecting insertion, independently verified, and supplied as a
+route is improved by precedence-respecting insertion, multiple rebuild orders and one
+contract-removal/repair pass, independently verified, and supplied as a
 complete CP-SAT hint. Its verified reward is an objective lower bound; its route remains available
 even if CP-SAT times out before recording an assignment. Jump closures/concrete paths are cached by
 exact routing policy. No better solution is removed. The explicit `max_candidates` cap remains the

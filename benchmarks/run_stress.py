@@ -114,7 +114,7 @@ def prepare_case(name: str, *, seed: int = 17) -> tuple[UniverseGraph, PreparedP
     return graph, prepare_problem(snapshot, graph, constraints)
 
 
-def main() -> int:
+def main(*, experiment: dict[str, str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", nargs="+", choices=CASES, default=CASES)
     parser.add_argument("--time-limit", type=float, default=30)
@@ -175,6 +175,7 @@ def main() -> int:
             iterations=c.decomposition_iterations,
             cuts=c.decomposition_learned_cuts,
             oracle_wall=c.decomposition_subproblem_wall_time_seconds,
+            **({"experiment": experiment} if experiment is not None else {}),
         )
         encoded = json.dumps(row, sort_keys=True)
         print(encoded, flush=True)

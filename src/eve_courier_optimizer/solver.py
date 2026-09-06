@@ -39,7 +39,7 @@ from .bounds import (
     hint_system_relaxation_master,
     solve_system_relaxation_master,
 )
-from .construction import insert_additional_contracts
+from .construction import improve_incumbent
 from .domain import (
     ActionKind,
     CollateralMode,
@@ -1737,8 +1737,11 @@ def solve_exact(
         sorted({visit.contract_id for visit in seed_visits if isinstance(visit, PlannedAction)})
     )
     seed_simulation = simulate_and_verify(prepared.problem, graph, seed_visits, seed_ids)
-    seed_visits, seed_simulation = insert_additional_contracts(
-        prepared, graph, seed_visits, seed_simulation
+    restart_visits = _build_greedy_route_hint(
+        replace(prepared, problem=replace(prepared.problem, contracts=()), scores=())
+    )
+    seed_visits, seed_simulation = improve_incumbent(
+        prepared, graph, seed_visits, seed_simulation, restart_visits=restart_visits
     )
     seed_ids = tuple(
         sorted({visit.contract_id for visit in seed_visits if isinstance(visit, PlannedAction)})

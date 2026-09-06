@@ -274,8 +274,10 @@ full-route fallback is not entered in either run.
 
 The optimizer builds a conservative greedy sequential route, reserving a concrete path through the
 remaining required systems and terminal. It then tries inserting additional pickups and deliveries
-to exploit shared hauls. The independent simulator checks each accepted insertion. The resulting
-route supplies complete master/event hints, including arcs and resource states, and a verified
+to exploit shared hauls. It also rebuilds from the required-waypoint route in three candidate
+orderings and tries one pass of removing and repairing each selected contract. This can replace
+early choices that block a more rewarding shared haul. The independent simulator checks each
+accepted route. The resulting route supplies complete master/event hints, including arcs and resource states, and a verified
 objective lower bound. CP-SAT remains free to replace the set and interleave events differently.
 The verified route remains available if search stops before recording an assignment.
 
@@ -294,17 +296,20 @@ Current proof-preserving performance work also includes:
   but gives presolve/linear relaxation an immediate route-independent bound;
 - a global elapsed-time equality tying the exact event-route arcs and selected action count directly
   to `finish_time`;
-- resource-aware two-contract incompatibility projection plus deterministic clique cuts;
+- resource- and deadline-aware two-contract incompatibility projection plus deterministic clique cuts;
 - a single-worker endpoint-system master whose rigorous objective bound is fed into dense exact
   solves without deleting any candidate;
 - master-guided reduced exact routing plus rigorously proven higher-order assumption-core cuts;
 - capacity-weighted transport work and distance-potential bounds, including indivisible-parcel
-  threshold counts, on the master and complete event model;
+  threshold counts and dual-feasible packing transforms, on the master and complete event model;
 - bounded caches for policy-specific jump closures and concrete paths; and
 - deterministic single-worker proof benchmarks.
 
 The optional `max_candidates` cap is different: it deletes modeled opportunities and therefore marks
 the proof scope truncated.
+
+Cumulative propagation and restricted exact neighborhoods remain opt-in experiments in the
+benchmark runners; they are not extra default solver stages.
 
 ## Reproducibility and workers
 
@@ -359,7 +364,7 @@ combined experiment is not a universal result about hints.
 | `bounds.py` | pair/clique necessary conditions, reusable endpoint-system master and learned no-good rows |
 | `sde.py` | policy-filtered BFS, closure/path caches, concrete shortest paths |
 | `solver.py` | master/exact loop, assumption cores, full event fallback, objectives and bound extraction |
-| `construction.py` | precedence-respecting insertion and independent acceptance of heuristic routes |
+| `construction.py` | insertion, multiple rebuild orders, removal/repair, and independent acceptance of heuristic routes |
 | `verification.py` | independent route and resource simulation |
 | `reference_solver.py` | exhaustive small-instance oracle independent of CP-SAT |
 | `proof.py` | canonical mathematical-input fingerprint |

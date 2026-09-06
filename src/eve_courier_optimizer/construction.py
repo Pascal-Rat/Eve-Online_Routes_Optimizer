@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 from .domain import ActionKind, CollateralMode
-from .planning import PreparedProblem
+from .planning import PreparedProblem, SingleContractScore
 from .sde import UniverseGraph
-from .verification import PlannedAction, PlannedVisit, SimulationResult, simulate_and_verify
+from .verification import (
+    PlannedAction,
+    PlannedVisit,
+    PlannedWaypoint,
+    SimulationResult,
+    simulate_and_verify,
+)
 
 
 def insert_additional_contracts(
@@ -13,6 +19,8 @@ def insert_additional_contracts(
     graph: UniverseGraph,
     visits: tuple[PlannedVisit, ...],
     simulation: SimulationResult,
+    *,
+    candidate_order: tuple[SingleContractScore, ...] | None = None,
 ) -> tuple[tuple[PlannedVisit, ...], SimulationResult]:
     """Try each unused contract in every precedence-respecting pair of insertion positions.
 
@@ -26,14 +34,18 @@ def insert_additional_contracts(
     c = prepared.problem.constraints
     contracts = {item.contract.contract_id: item for item in prepared.problem.contracts}
     selected = {visit.contract_id for visit in visits if isinstance(visit, PlannedAction)}
-    candidates = sorted(
-        prepared.scores,
-        key=lambda score: (
-            score.reward_per_hour_isk,
-            score.contract.contract.reward_units,
-            -score.contract.contract.contract_id,
-        ),
-        reverse=True,
+    candidates = (
+        candidate_order
+        if candidate_order is not None
+        else sorted(
+            prepared.scores,
+            key=lambda score: (
+                score.reward_per_hour_isk,
+                score.contract.contract.reward_units,
+                -score.contract.contract.contract_id,
+            ),
+            reverse=True,
+        )
     )
 
     def distance(source: int, destination: int | None) -> int:
@@ -133,3 +145,108 @@ def insert_additional_contracts(
                 selected.add(contract.contract_id)
                 break
     return visits, simulation
+
+
+def improve_incumbent(
+    prepared: PreparedProblem,
+    graph: UniverseGraph,
+    visits: tuple[PlannedVisit, ...],
+    simulation: SimulationResult,
+    *,
+    restart_visits: tuple[PlannedVisit, ...],
+) -> tuple[tuple[PlannedVisit, ...], SimulationResult]:
+    """Rebuild in three orders, then explore one contract-removal/repair neighborhood.
+
+    A sequential seed can spend capacity or collateral on an early attractive job that blocks
+    better shared hauls. Rebuilding from a mandatory-waypoint route can replace those choices.
+    Each removal starts from the same best rebuilt route, so this is a bounded pass rather than
+    an unbounded local search. Only independently verified improvements become search hints and
+    lower bounds; candidate eligibility, objective coefficients and proof scope remain unchanged.
+    """
+    best = insert_additional_contracts(prepared, graph, visits, simulation)
+    if prepared.problem.active_shipments or not best[1].report.valid:
+        return best
+    restart_simulation = simulate_and_verify(prepared.problem, graph, restart_visits, ())
+    if not restart_simulation.report.valid:
+        return best
+    orders = (
+        tuple(
+            sorted(
+                prepared.scores,
+                key=lambda s: (
+                    -s.reward_per_hour_isk,
+                    -s.contract.contract.reward_units,
+                    s.contract.contract.contract_id,
+                ),
+            )
+        ),
+        tuple(
+            sorted(
+                prepared.scores,
+                key=lambda s: (
+                    -s.contract.contract.reward_units,
+                    s.contract.contract.contract_id,
+                ),
+            )
+        ),
+        tuple(
+            sorted(
+                prepared.scores,
+                key=lambda s: (
+                    -s.contract.contract.reward_units
+                    / max(1, s.contract.contract.collateral_units),
+                    s.contract.contract.contract_id,
+                ),
+            )
+        ),
+    )
+
+    def quality(result: tuple[tuple[PlannedVisit, ...], SimulationResult]) -> tuple[int, int]:
+        return result[1].total_reward_units, -result[1].finish_seconds
+
+    for order in orders:
+        candidate = insert_additional_contracts(
+            prepared,
+            graph,
+            restart_visits,
+            restart_simulation,
+            candidate_order=order,
+        )
+        if quality(candidate) > quality(best):
+            best = candidate
+    seed_visits = best[0]
+    selected = {v.contract_id for v in seed_visits if isinstance(v, PlannedAction)}
+    items = {i.contract.contract_id: i for i in prepared.problem.contracts}
+    for removed in sorted(selected):
+        reduced: list[PlannedVisit] = []
+        for visit in seed_visits:
+            if isinstance(visit, PlannedAction) and visit.contract_id == removed:
+                item = items[removed]
+                system = (
+                    item.origin_system_id
+                    if visit.action is ActionKind.PICKUP
+                    else item.destination_system_id
+                )
+                if system in prepared.problem.constraints.required_system_ids:
+                    reduced.append(PlannedWaypoint(system))
+            else:
+                reduced.append(visit)
+        sim = simulate_and_verify(
+            prepared.problem,
+            graph,
+            tuple(reduced),
+            tuple(sorted(selected - {removed})),
+        )
+        if not sim.report.valid:
+            continue
+        for order in orders[:2]:
+            candidate = insert_additional_contracts(
+                prepared,
+                graph,
+                tuple(reduced),
+                sim,
+                candidate_order=order,
+            )
+            if quality(candidate) > quality(best):
+                best = candidate
+    return best
