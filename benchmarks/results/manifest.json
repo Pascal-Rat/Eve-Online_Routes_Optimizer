@@ -1,0 +1,40 @@
+{
+  "baseline_commit": "d615023",
+  "python": "3.12.3",
+  "ortools": "9.15.6755",
+  "cpu": "Intel Core i7-9750H, 6 physical cores / 12 logical CPUs",
+  "memory": "approximately 31 GiB",
+  "date": "2026-09-06",
+  "source_hashes": {
+    "baseline": "b29775136cf8c3fc0c9fd76f773d61850efcd8f840efde4243908105dfbc9d0a",
+    "transport-hints": "6714a0ace7a326b9a44b9e2f61984458733cc992af81338d566f673db0f1fd49",
+    "transport-hints-cores": "94d6cf7ecac79d845694e626320091b8dc946be9c4da6e679b3dbddac53e636d",
+    "transport-packing": "d1b8ccbaae13c12fc9afaf49151ef3fdd16624c8228ce6d4c61e6c00d627c761",
+    "improved": "61e3a4e7b83a7ea0d6b12e3594dfd34449900736510fb1a48d5b0b4d142ab848",
+    "reviewed": "def815f8be3b68fe4555918fa6e3e174cd5896f56160142904f4e40e0e473887",
+    "final": "8cb03ad370db34e02831d461cdc5383b5fcbbb2db88b3e2d10fd58394d73e6d9"
+  },
+  "hash_scheme": "SHA256 of sorted relative .py path, NUL, and file bytes for the imported package",
+  "scope": "All candidates after safe preparation; no candidate cap; duration refinement disabled",
+  "budgets": "seconds is the full event-model fallback budget, not an end-to-end deadline. Master up to 10s, decomposition up to 20s, each oracle up to 2s, at most 8 iterations; all unchanged from baseline.",
+  "seeds": "17 for development cases; 29 for four fresh synthetic cases at 60s and a rolling Empire search repeat; 37 for four untouched final synthetic cases at 10s. Seed controls synthetic generation and CP-SAT; Empire mathematical inputs do not depend on the seed.",
+  "timing_caveat": "Sequential solver runs. Earlier exploratory baseline-30 and baseline-repeat-30 runs had brief overlap with validation/aborted exploratory work; use elapsed as an observation, not a controlled speed ratio. Multiworker CP-SAT is nondeterministic. Final improved runs and 60s holdout comparisons run without other benchmark or test processes.",
+  "variants": {
+    "transport-hints": "Direct and potential resource-work bounds; complete verified hints; incumbent preservation; feasible master selections. No threshold packing or insertion; original oracle objective/core setup.",
+    "transport-hints-cores": "Adds satisfaction-based oracle and single-worker core extraction; preserves faster incumbents on reward ties.",
+    "transport-packing": "Adds count resources for demands > capacity/(k+1), k=1,2,3.",
+    "improved": "Adds independently verified pickup/delivery insertion and explicit bound/incumbent consistency guards. Used for 10/30-second and seed-29 holdout primary-search measurements.",
+    "reviewed": "Same primary search as improved; review fixes requested secondary duration refinement when a seed closes the proof without a primary assignment, and accounts for unsuccessful secondary solve time. Used for the longer pre-feedback Empire comparison.",
+    "final": "Adds strict-reward-progress feedback into the master and immediate closure against an existing verified incumbent. Original budgets unchanged. This is the committed source; evaluated on rolling Empire seeds 17/29 at 60s and fresh seed-37 synthetic instances at 10s."
+  },
+  "reproduction": "Use run_stress.py from this commit against either the package at baseline_commit or this commit, retaining the same cases, seed, workers and time limit. Earlier variant runs are exploratory observations identified by source hashes; the final-versus-baseline comparison is the reproducible release comparison.",
+  "validation": {
+    "pytest": "155 passed; 87.53% branch-inclusive coverage",
+    "ruff": "src tools tests benchmarks passed",
+    "mypy": "src tools tests benchmarks passed",
+    "wheel": "offline wheel build passed",
+    "golden_benchmarks": "frozen 250M/165M and locked Empire 58M/25.651527M; all proven optimal"
+  },
+  "recorded_runs": 94,
+  "distinct_problem_fingerprints": 16
+}

@@ -82,14 +82,15 @@ looser, never deliberately tighter. For `OPTIMAL`, the exact integer objective i
 ### Composite master/exact proof
 
 For dense problems, the auxiliary system model deliberately relaxes the courier problem to a route
-over distinct endpoint systems and adds only independently derived necessary pair/clique conditions.
+over distinct endpoint systems and adds independently derived necessary pair/clique and
+resource transport-work conditions.
 Every exact route maps to a feasible auxiliary route, so
 
 $$
 R^*_{exact}\le U_{system}.
 $$
 
-V1.5 can also use an `OPTIMAL` auxiliary solution as a master selection. It routes that exact selected
+An `OPTIMAL` or `FEASIBLE` auxiliary solution can supply a master selection. The solver routes that selected
 set in the real pickup/delivery model and independently simulates the extracted route against the
 original full prepared problem. If the verified reward is exactly $U_{system}$, then
 
@@ -113,12 +114,19 @@ shrinking removes a literal only after another exact `INFEASIBLE` proof. An `UNK
 creates a cut. If the bounded decomposition does not close, the complete exact model still runs with
 all valid bounds and cuts accumulated so far.
 
+A strictly improved, independently verified route also feeds its reward lower bound and projected
+hint back into the master within the existing budget. Equality between a retained ceiling and an
+already verified route closes the proof without a duplicate exact-oracle solve.
+
 Plan schema 3 records the relaxation status, ceiling, wall time, distinct endpoint-system count,
 pair/clique counts, decomposition status/iterations, learned-core count, exact-subproblem time and
 whether the composite proof closed under `certificate.bound_strengthening`. A timed-out auxiliary
-`FEASIBLE` solve contributes only its rigorous CP-SAT best objective bound, never its relaxation
-incumbent. It is not used as a master selection. An auxiliary `UNKNOWN` result without a usable
-ceiling is ignored. Full derivations are in
+`FEASIBLE` solve contributes its rigorous CP-SAT best objective bound as a ceiling. Its relaxation
+incumbent becomes a lower-bound witness only after the exact oracle routes it and the independent
+verifier accepts it. An auxiliary `UNKNOWN` result cannot erase an earlier usable ceiling.
+The constructive route is independently verified too; `UNKNOWN_WITH_INCUMBENT` means CP-SAT did
+not record an assignment, but that verified route remains available with a conservative bound.
+Full derivations are in
 [MATHEMATICAL_MODEL.md](MATHEMATICAL_MODEL.md#9-proof-strengthening-upper-bounds).
 
 ## Verification chain
@@ -129,8 +137,8 @@ A successful proof result passes several distinct checks:
 2. On dense cases, the system relaxation and pair/clique derivations supply only mathematically
    necessary upper-bound strengthening; random small instances are regression-checked against the
    independent exhaustive optimum.
-3. Either full exact CP-SAT closes its own objective bound, or an optimal system master and reduced
-   exact model produce matching upper/lower rewards. Proven reduced-model assumption cores are fed
+3. Either full exact CP-SAT closes its own objective bound, or a rigorous master ceiling and an
+   independently verified route produce matching upper/lower rewards. Proven assumption cores are fed
    back only as necessary coexistence cuts.
 4. Route extraction follows only selected circuit arcs from start to dummy end.
 5. An independent simulator rebuilds shortest stargate paths and checks time, order, cargo,

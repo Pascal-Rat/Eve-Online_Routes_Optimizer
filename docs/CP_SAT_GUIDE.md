@@ -153,6 +153,9 @@ never relabels such an incumbent as optimal.
 | `INFEASIBLE` | `proven_infeasible` | no assignment satisfies the modeled mandatory constraints |
 | `UNKNOWN` / no incumbent | `unknown` | time/search ended without a solution or proof |
 
+A separately constructed and independently verified route survives a CP-SAT `UNKNOWN` result.
+That case uses `UNKNOWN_WITH_INCUMBENT` and reports its reward with a conservative upper bound.
+
 V1.5 adds a composite route to the first row. A system-master CP-SAT solve may return `OPTIMAL`, and
 a second exact reduced model may produce an independently verified courier route with exactly that
 reward. The route is the lower bound $L$ and the master optimum is the upper bound $U$. When they
@@ -171,6 +174,7 @@ avoids mixing units through an unsafe hand-tuned weighted objective.
 
 A timeout in the second stage does not invalidate the first-stage reward proof. It only means the
 returned reward-optimal route is not proved to be the fastest among all equally rewarding routes.
+Even a completed fixed-selection secondary solve proves fastest duration only within that selection.
 
 ## V1.4: tightening the upper bound before full route search
 
@@ -228,7 +232,7 @@ V1.4 discovered the key information for DST but did not exploit the relaxation's
 set. It proved that 58 M ISK was the ceiling, then asked the 194-node full event model to rediscover
 a compatible pickup/dropoff subset and route from scratch. V1.5 separates those two questions.
 
-Once the endpoint-system master itself returns `OPTIMAL`, its selected contracts are copied into a
+Once the endpoint-system master returns `OPTIMAL` or `FEASIBLE`, its selected contracts are copied into a
 reduced instance of the exact pickup/delivery model. All those selections are positive CP-SAT
 assumptions; every other optional contract is absent. Active shipments, required waypoints, terminal
 shape, metric closure, cargo, collateral, parcel count and deadlines remain exact. The resulting
@@ -237,14 +241,16 @@ model is usually tiny compared with the full event circuit.
 There are three proof-safe outcomes:
 
 1. **Exact feasible at the master reward.** Independent route simulation verifies the route against
-   the original full prepared problem. Exact feasible reward equals rigorous master optimum, so the
-   global reward proof closes immediately.
+   the original full prepared problem. Equality with the rigorous master ceiling closes the proof;
+   otherwise the route supplies a verified incumbent. A strictly improved reward and its projected
+   route hint are fed back into the master within the remaining decomposition budget, then retained
+   for the complete fallback if the gap remains open.
 2. **Exact infeasible.** CP-SAT supplies a sufficient core of positive selection assumptions. The
    solver may shrink it by deletion tests, but removes a literal only after another `INFEASIBLE`
    result. Because deleting optional courier jobs cannot increase time or resource use and metric
    shortcutting cannot lengthen travel, no full route can contain every contract in that core. The
    master safely learns `sum(core selections) <= len(core) - 1` and resolves.
-3. **Anything unresolved.** `FEASIBLE`/`UNKNOWN` master status, an `UNKNOWN` exact subproblem, the
+3. **Anything unresolved.** An `UNKNOWN` master status, an `UNKNOWN` exact subproblem, the
    iteration limit or the decomposition wall limit cannot justify a new proof. The complete event
    model runs with every already-valid ceiling and learned core attached.
 
@@ -252,6 +258,11 @@ The master deliberately stays single-worker for reproducibility and stability. E
 allowed up to ten seconds by default; exact selection/core work gets up to two seconds per iteration,
 inside a 20-second total decomposition envelope. These are search budgets only. They do not delete a
 contract or weaken proof scope.
+
+For OR-Tools 9.15, useful core extraction requires a satisfaction problem with one worker. The
+oracle clears the objective and, after portfolio infeasibility, uses remaining budget for
+single-worker core extraction and deletion checks. See the
+[versioned upstream implementation](https://github.com/google/or-tools/blob/v9.15/ortools/sat/cp_model_solver.cc#L2509).
 
 On the unchanged 96-eligible frozen Empire DST profile, the first master optimum is five contracts
 worth 58.000000 M ISK. The reduced exact model routes those five and the independent verifier accepts
@@ -261,12 +272,12 @@ full-route fallback is not entered in either run.
 
 ## Hints and safe performance work
 
-The optimizer builds a conservative greedy sequential route and uses its selected-contract set as a
-CP-SAT **selection hint**. Before suggesting each additional contract it reserves a deterministic
-nearest-next path through every still-required waypoint and the loop/fixed terminal, so the hint does
-not consume the horizon that the declared trip ending still needs. A hint proposes starting values;
-it neither forces those values nor removes any alternatives. CP-SAT remains free to replace the set
-and interleave events differently, and the final bound still supplies the proof.
+The optimizer builds a conservative greedy sequential route, reserving a concrete path through the
+remaining required systems and terminal. It then tries inserting additional pickups and deliveries
+to exploit shared hauls. The independent simulator checks each accepted insertion. The resulting
+route supplies complete master/event hints, including arcs and resource states, and a verified
+objective lower bound. CP-SAT remains free to replace the set and interleave events differently.
+The verified route remains available if search stops before recording an assignment.
 
 Current proof-preserving performance work also includes:
 
@@ -287,6 +298,8 @@ Current proof-preserving performance work also includes:
 - a single-worker endpoint-system master whose rigorous objective bound is fed into dense exact
   solves without deleting any candidate;
 - master-guided reduced exact routing plus rigorously proven higher-order assumption-core cuts;
+- capacity-weighted transport work and distance-potential bounds, including indivisible-parcel
+  threshold counts, on the master and complete event model;
 - bounded caches for policy-specific jump closures and concrete paths; and
 - deterministic single-worker proof benchmarks.
 
@@ -334,8 +347,9 @@ The project deliberately avoids cargo-cult parameter tuning. A v1.2 experiment t
 pinned unused optional-node state and supplied a complete greedy circuit hint was benchmarked on the
 same hard problem: at eight workers the 60-second incumbent fell from 55 M to 42 M ISK while the
 upper bound improved by only about 0.27%. Those changes were rejected rather than shipped. Future
-proof work should continue strengthening the master or generating targeted valid cuts where frozen
-benchmarks demonstrate a real bottleneck, rather than simply turning more CP-SAT knobs.
+proof work should continue measuring formulation changes across different problem shapes. The current
+solver combines complete hints with resource-work bounds and incumbent preservation; the earlier
+combined experiment is not a universal result about hints.
 
 ## Reading the implementation
 
@@ -345,6 +359,7 @@ benchmarks demonstrate a real bottleneck, rather than simply turning more CP-SAT
 | `bounds.py` | pair/clique necessary conditions, reusable endpoint-system master and learned no-good rows |
 | `sde.py` | policy-filtered BFS, closure/path caches, concrete shortest paths |
 | `solver.py` | master/exact loop, assumption cores, full event fallback, objectives and bound extraction |
+| `construction.py` | precedence-respecting insertion and independent acceptance of heuristic routes |
 | `verification.py` | independent route and resource simulation |
 | `reference_solver.py` | exhaustive small-instance oracle independent of CP-SAT |
 | `proof.py` | canonical mathematical-input fingerprint |

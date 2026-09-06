@@ -33,16 +33,20 @@ from .bounds import (
     SelectionCuts,
     SystemRelaxationBound,
     add_proven_infeasible_selection_cut,
+    add_resource_work_bounds,
     build_selection_cuts,
     build_system_relaxation_master,
+    hint_system_relaxation_master,
     solve_system_relaxation_master,
 )
+from .construction import insert_additional_contracts
 from .domain import (
     ActionKind,
     CollateralMode,
     OptimalityCertificate,
     ProofStatus,
     SolveResult,
+    TravelLegKind,
 )
 from .planning import PreparedProblem
 from .proof import canonical_problem_sha256, optimality_claim
@@ -136,6 +140,8 @@ class _RouteModel:
     arc_is_used: dict[tuple[int, int], cp_model.IntVar]
     total_reward_units: cp_model.IntVar
     finish_time_seconds: cp_model.IntVar
+    event_is_skipped: dict[int, cp_model.IntVar]
+    state_variables: dict[str, list[cp_model.IntVar]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,8 +259,8 @@ def _last_valid_pickup_second(prepared: PreparedProblem, contract_id: int) -> in
     )
 
 
-def _build_greedy_selection_hint(prepared: PreparedProblem) -> frozenset[int]:
-    """Build a deterministic sequential selection hint with a feasible required-route tail.
+def _build_greedy_route_hint(prepared: PreparedProblem) -> tuple[PlannedVisit, ...]:
+    """Build a deterministic sequential route with a feasible required-system tail.
 
     Hints never constrain the model. This conservative constructor selects only jobs it can visit
     pickup-then-delivery without interleaving while still reserving a concrete path through every
@@ -263,12 +269,12 @@ def _build_greedy_selection_hint(prepared: PreparedProblem) -> frozenset[int]:
 
     problem = prepared.problem
     if problem.active_shipments:
-        return frozenset()
+        return ()
     constraints = problem.constraints
     current_system_id = constraints.start_system_id
     elapsed_seconds = 0
     locked_collateral_units = 0
-    suggested_contract_ids: set[int] = set()
+    visits: list[PlannedVisit] = []
     contracts_by_score = sorted(
         prepared.scores,
         key=lambda score: (
@@ -364,13 +370,40 @@ def _build_greedy_selection_hint(prepared: PreparedProblem) -> frozenset[int]:
                 > pickup_arrival_seconds + contract.days_to_complete * 86_400
             ):
                 continue
-        suggested_contract_ids.add(contract.contract_id)
+        visits.extend(
+            (
+                PlannedAction(ActionKind.PICKUP, contract.contract_id),
+                PlannedAction(ActionKind.DELIVERY, contract.contract_id),
+            )
+        )
         if constraints.collateral_mode is CollateralMode.LOCKED:
             locked_collateral_units += contract.collateral_units
         elapsed_seconds = delivery_completion_seconds
         current_system_id = routable.destination_system_id
         visited_required_system_ids = newly_visited_required_system_ids
-    return frozenset(suggested_contract_ids)
+    remaining = required_system_ids - visited_required_system_ids
+    if constraints.terminal_system_id is not None:
+        remaining.discard(constraints.terminal_system_id)
+    while remaining:
+        choices = [
+            (jumps, system)
+            for system in remaining
+            if (jumps := prepared.jump_matrix.get((current_system_id, system))) is not None
+        ]
+        if not choices:
+            return ()
+        _, current_system_id = min(choices)
+        visits.append(PlannedWaypoint(current_system_id))
+        remaining.remove(current_system_id)
+    return tuple(visits)
+
+
+def _build_greedy_selection_hint(prepared: PreparedProblem) -> frozenset[int]:
+    return frozenset(
+        visit.contract_id
+        for visit in _build_greedy_route_hint(prepared)
+        if isinstance(visit, PlannedAction)
+    )
 
 
 def _build_route_event_catalog(prepared: PreparedProblem) -> _RouteEventCatalog:
@@ -553,6 +586,7 @@ def _build_model(prepared: PreparedProblem) -> _RouteModel:
     }
     arc_is_used: dict[tuple[int, int], cp_model.IntVar] = {}
     circuit_arc_definitions: list[tuple[int, int, cp_model.IntVar]] = []
+    skipped_events: dict[int, cp_model.IntVar] = {}
 
     # AddCircuit expects a cycle. This always-on artificial arc turns the desired start-to-end
     # path into a cycle without representing real travel or consuming time.
@@ -565,6 +599,7 @@ def _build_model(prepared: PreparedProblem) -> _RouteModel:
         if event.is_optional:
             assert event.contract_id is not None
             event_is_skipped = model.new_bool_var(f"skip_{event.label}")
+            skipped_events[event.node_id] = event_is_skipped
             model.add(event_is_skipped + contract_is_selected[event.contract_id] == 1)
             circuit_arc_definitions.append((event.node_id, event.node_id, event_is_skipped))
         else:
@@ -572,6 +607,7 @@ def _build_model(prepared: PreparedProblem) -> _RouteModel:
             # incoming/outgoing arc is eliminated as impossible. The model then proves infeasible
             # instead of accidentally omitting an unreachable commitment.
             mandatory_event_self_loop = model.new_bool_var(f"forbid_skip_{event.label}")
+            skipped_events[event.node_id] = mandatory_event_self_loop
             model.add(mandatory_event_self_loop == 0)
             circuit_arc_definitions.append(
                 (event.node_id, event.node_id, mandatory_event_self_loop)
@@ -993,6 +1029,7 @@ def _build_model(prepared: PreparedProblem) -> _RouteModel:
             for routable in problem.contracts
         )
     )
+    add_resource_work_bounds(model, prepared, contract_is_selected)
     model.maximize(total_reward_units)
     suggested_contract_ids = _build_greedy_selection_hint(prepared)
     for contract_id, is_contract_selected in contract_is_selected.items():
@@ -1010,7 +1047,107 @@ def _build_model(prepared: PreparedProblem) -> _RouteModel:
         arc_is_used=arc_is_used,
         total_reward_units=total_reward_units,
         finish_time_seconds=arrival_time_seconds[_END_NODE_ID],
+        event_is_skipped=skipped_events,
+        state_variables={
+            "arrival": arrival_time_seconds,
+            "order": visit_order,
+            "cargo": cargo_load_units,
+            **({"parcels": active_parcel_count} if active_parcel_count is not None else {}),
+            **(
+                {"collateral": locked_collateral_units}
+                if locked_collateral_units is not None
+                else {}
+            ),
+        },
     )
+
+
+def _simulation_visits(simulation: SimulationResult) -> tuple[PlannedVisit, ...]:
+    visits: list[PlannedVisit] = []
+    for leg in simulation.travel_legs:
+        if leg.kind is TravelLegKind.WAYPOINT:
+            visits.append(PlannedWaypoint(leg.to_system_id))
+        elif leg.kind in {TravelLegKind.PICKUP, TravelLegKind.DELIVERY}:
+            assert leg.contract_id is not None
+            visits.append(PlannedAction(ActionKind(leg.kind.value), leg.contract_id))
+    return tuple(visits)
+
+
+def _hint_verified_route(
+    route: _RouteModel,
+    prepared: PreparedProblem,
+    visits: tuple[PlannedVisit, ...],
+    selected_ids: tuple[int, ...],
+) -> None:
+    """Give CP-SAT a complete assignment, not just contract-selection suggestions."""
+    action_nodes = {
+        (e.action_kind, e.contract_id): e.node_id for e in route.events if e.action_kind is not None
+    }
+    waypoint_nodes = {e.system_id: e.node_id for e in route.events[2:] if e.action_kind is None}
+    nodes = [route.start_node_id]
+    for visit in visits:
+        if isinstance(visit, PlannedAction):
+            node = action_nodes[visit.action, visit.contract_id]
+            waypoint = waypoint_nodes.get(route.events[node].system_id)
+            if waypoint is not None and waypoint not in nodes:
+                nodes.append(waypoint)
+        else:
+            node = waypoint_nodes[visit.system_id]
+        if node not in nodes:
+            nodes.append(node)
+    nodes.append(route.end_node_id)
+    used_arcs = set(zip(nodes, nodes[1:], strict=False))
+    used_arcs.add((route.end_node_id, route.start_node_id))
+    if not used_arcs <= route.arc_is_used.keys():
+        raise RuntimeError("verified incumbent uses an arc removed from the exact model")
+    route.model.clear_hints()  # type: ignore[no-untyped-call]
+    selected_set = set(selected_ids)
+    for contract_id, variable in route.contract_is_selected.items():
+        route.model.add_hint(variable, int(contract_id in selected_set))
+    for node, variable in route.event_is_skipped.items():
+        route.model.add_hint(variable, int(node not in nodes))
+    for arc, variable in route.arc_is_used.items():
+        route.model.add_hint(variable, int(arc in used_arcs))
+    values = {key: [0] * len(route.events) for key in route.state_variables}
+    for shipment in prepared.problem.active_shipments:
+        if shipment.picked:
+            values["cargo"][0] += shipment.contract.contract.volume_units
+            if "parcels" in values:
+                values["parcels"][0] += 1
+        if "collateral" in values:
+            values["collateral"][0] += shipment.contract.contract.collateral_units
+    c = prepared.problem.constraints
+    for previous, node in zip(nodes, nodes[1:], strict=False):
+        source, target = route.events[previous], route.events[node]
+        assert source.system_id is not None
+        jumps = (
+            0
+            if target.system_id is None
+            else prepared.jump_matrix[source.system_id, target.system_id]
+        )
+        assert jumps is not None
+        values["arrival"][node] = (
+            values["arrival"][previous]
+            + jumps * c.travel.seconds_per_jump
+            + (c.travel.service_seconds if source.action_kind is not None else 0)
+        )
+        values["order"][node] = values["order"][previous] + 1
+        values["cargo"][node] = values["cargo"][previous] + target.cargo_delta
+        if "parcels" in values:
+            values["parcels"][node] = values["parcels"][previous] + target.parcel_delta
+        if "collateral" in values:
+            values["collateral"][node] = values["collateral"][previous] + target.collateral_delta
+    for key, variables in route.state_variables.items():
+        for variable, value in zip(variables, values[key], strict=True):
+            route.model.add_hint(variable, value)
+    reward = sum(s.contract.contract.reward_units for s in prepared.problem.active_shipments)
+    reward += sum(
+        item.contract.reward_units
+        for item in prepared.problem.contracts
+        if item.contract.contract_id in selected_set
+    )
+    route.model.add_hint(route.total_reward_units, reward)
+    route.model.add(route.total_reward_units >= reward)
 
 
 def _read_solver_run_stats(
@@ -1164,7 +1301,7 @@ def _solve_reduced_exact_oracle(
 
     reduced_problem = _restrict_to_contract_selection(prepared, selected_contract_ids)
     route_model = _build_model(reduced_problem)
-    route_model.model.maximize(0)
+    route_model.model.clear_objective()  # type: ignore[no-untyped-call]
     contract_id_by_assumption_index = {
         literal.index: contract_id
         for contract_id, literal in route_model.contract_is_selected.items()
@@ -1177,6 +1314,8 @@ def _solve_reduced_exact_oracle(
     def solve_assuming_selected_contracts(
         assumed_selected_contract_ids: tuple[int, ...],
         time_limit_seconds: float,
+        *,
+        core_search: bool = False,
     ) -> tuple[cp_model.CpSolver, cp_model.CpSolverStatus]:
         route_model.model.clear_assumptions()
         route_model.model.add_assumptions(
@@ -1189,6 +1328,8 @@ def _solve_reduced_exact_oracle(
         if validation_error:
             raise ValueError(f"invalid reduced exact model: {validation_error}")
         solver = _new_time_limited_solver(config, time_limit_seconds)
+        if core_search:
+            solver.parameters.num_search_workers = 1
         status = solver.solve(route_model.model)
         if status == cp_model.MODEL_INVALID:
             raise ValueError("CP-SAT rejected the validated reduced exact model")
@@ -1236,6 +1377,19 @@ def _solve_reduced_exact_oracle(
             conflicts=total_conflicts,
         )
 
+    # OR-Tools 9.15 only extracts useful assumption cores for satisfaction with one worker.
+    # Keep portfolio feasibility search, then spend remaining oracle budget on a real core.
+    remaining_time_seconds = solve_deadline - time.perf_counter()
+    if config.num_workers > 1 and remaining_time_seconds > 0.001:
+        core_solver, core_status = solve_assuming_selected_contracts(
+            selected_contract_ids, remaining_time_seconds, core_search=True
+        )
+        total_wall_time_seconds += core_solver.wall_time
+        total_branches += core_solver.num_branches
+        total_conflicts += core_solver.num_conflicts
+        if core_status == cp_model.INFEASIBLE:
+            selection_solver = core_solver
+
     assumption_core_indexes = selection_solver.sufficient_assumptions_for_infeasibility()
     unexpected_assumption_indexes = tuple(
         index for index in assumption_core_indexes if index not in contract_id_by_assumption_index
@@ -1263,7 +1417,7 @@ def _solve_reduced_exact_oracle(
             if candidate_contract_id != contract_id
         )
         shrink_solver, shrink_status = solve_assuming_selected_contracts(
-            trial_contract_ids, remaining_time_seconds
+            trial_contract_ids, remaining_time_seconds, core_search=True
         )
         total_wall_time_seconds += shrink_solver.wall_time
         total_branches += shrink_solver.num_branches
@@ -1348,6 +1502,8 @@ def _run_dense_decomposition(
     prepared: PreparedProblem,
     graph: UniverseGraph,
     config: SolverConfig,
+    *,
+    incumbent: tuple[tuple[int, ...], SimulationResult] | None = None,
 ) -> _DecompositionOutcome:
     """Try to prove the answer with a smaller model before building the full route model.
 
@@ -1393,6 +1549,14 @@ def _run_dense_decomposition(
         )
 
     master_model = build_system_relaxation_master(prepared, selection_cuts=selection_cuts)
+    if incumbent is not None:
+        ids, simulation = incumbent
+        hint_system_relaxation_master(
+            master_model,
+            ids,
+            tuple(leg.to_system_id for leg in simulation.travel_legs),
+            simulation.total_reward_units,
+        )
     if config.decomposition_time_seconds == 0:
         system_relaxation = solve_system_relaxation_master(
             master_model,
@@ -1425,8 +1589,9 @@ def _run_dense_decomposition(
     iteration_count = 0
     status_name = "budget_exhausted"
     proven_infeasible = False
-    verified_simulation: SimulationResult | None = None
-    selected_contract_ids: tuple[int, ...] = ()
+    verified_simulation = incumbent[1] if incumbent else None
+    selected_contract_ids = incumbent[0] if incumbent else ()
+    best_master_bound: int | None = None
 
     for _ in range(config.decomposition_max_iterations):
         remaining_time_seconds = decomposition_deadline - time.perf_counter()
@@ -1442,12 +1607,24 @@ def _run_dense_decomposition(
         master_wall_time_seconds += master_result.wall_time_seconds
         master_branches += master_result.branches
         master_conflicts += master_result.conflicts
-        latest_master_result = master_result
+        if master_result.upper_bound_units is not None:
+            best_master_bound = (
+                master_result.upper_bound_units
+                if best_master_bound is None
+                else min(best_master_bound, master_result.upper_bound_units)
+            )
+        latest_master_result = replace(master_result, upper_bound_units=best_master_bound)
         if master_result.status_name == "INFEASIBLE":
             proven_infeasible = True
             status_name = "master_infeasible"
             break
-        if master_result.status_name != "OPTIMAL":
+        if (
+            verified_simulation is not None
+            and best_master_bound == verified_simulation.total_reward_units
+        ):
+            status_name = "bound_matched"
+            break
+        if master_result.status_name not in {"OPTIMAL", "FEASIBLE"}:
             status_name = f"master_{master_result.status_name.lower()}"
             break
 
@@ -1475,27 +1652,25 @@ def _run_dense_decomposition(
                 raise RuntimeError(
                     "master objective disagrees with the verified reduced exact route"
                 )
-            if master_result.upper_bound_units != exact_route_result.simulation.total_reward_units:
-                raise RuntimeError("optimal system master returned an inconsistent objective bound")
-            verified_simulation = exact_route_result.simulation
-            selected_contract_ids = exact_route_result.selected_contract_ids
-            status_name = "bound_matched"
-            if config.minimize_finish_time_after_proof:
-                refinement_result = _refine_fixed_selection_finish_time(
-                    prepared,
-                    graph,
+            previous_reward = verified_simulation.total_reward_units if verified_simulation else -1
+            if verified_simulation is None or (
+                exact_route_result.simulation.total_reward_units,
+                -exact_route_result.simulation.finish_seconds,
+            ) > (verified_simulation.total_reward_units, -verified_simulation.finish_seconds):
+                verified_simulation = exact_route_result.simulation
+                selected_contract_ids = exact_route_result.selected_contract_ids
+            if best_master_bound != verified_simulation.total_reward_units:
+                status_name = "incumbent_found"
+                if verified_simulation.total_reward_units <= previous_reward:
+                    break  # A repeated reward does not justify restarting the same master again.
+                hint_system_relaxation_master(
+                    master_model,
                     selected_contract_ids,
-                    config,
+                    tuple(leg.to_system_id for leg in verified_simulation.travel_legs),
+                    verified_simulation.total_reward_units,
                 )
-                subproblem_wall_time_seconds += refinement_result.wall_time_seconds
-                subproblem_branches += refinement_result.branches
-                subproblem_conflicts += refinement_result.conflicts
-                if (
-                    refinement_result.simulation is not None
-                    and refinement_result.simulation.finish_seconds
-                    < verified_simulation.finish_seconds
-                ):
-                    verified_simulation = refinement_result.simulation
+                continue
+            status_name = "bound_matched"
             break
         if exact_route_result.status != cp_model.INFEASIBLE:
             status_name = f"oracle_{exact_route_result.status_name.lower()}"
@@ -1557,7 +1732,25 @@ def solve_exact(
         progress("Proving reward with the system master and exact route checks")
 
     # The decomposition often proves dense instances without constructing the full action model.
-    decomposition = _run_dense_decomposition(prepared, graph, solver_config)
+    seed_visits = _build_greedy_route_hint(prepared)
+    seed_ids = tuple(
+        sorted({visit.contract_id for visit in seed_visits if isinstance(visit, PlannedAction)})
+    )
+    seed_simulation = simulate_and_verify(prepared.problem, graph, seed_visits, seed_ids)
+    seed_visits, seed_simulation = insert_additional_contracts(
+        prepared, graph, seed_visits, seed_simulation
+    )
+    seed_ids = tuple(
+        sorted({visit.contract_id for visit in seed_visits if isinstance(visit, PlannedAction)})
+    )
+    incumbent = (seed_ids, seed_simulation) if seed_simulation.report.valid else None
+    decomposition = _run_dense_decomposition(prepared, graph, solver_config, incumbent=incumbent)
+    if decomposition.simulation is not None and (
+        incumbent is None
+        or (decomposition.simulation.total_reward_units, -decomposition.simulation.finish_seconds)
+        > (incumbent[1].total_reward_units, -incumbent[1].finish_seconds)
+    ):
+        incumbent = (decomposition.selected_contract_ids, decomposition.simulation)
     relaxation = decomposition.relaxation
     selection_cuts = decomposition.selection_cuts
     problem_sha256 = canonical_problem_sha256(prepared.problem, prepared.jump_matrix)
@@ -1566,6 +1759,12 @@ def solve_exact(
     relaxation_conflicts = relaxation.conflicts if relaxation is not None else 0
     relaxation_status = relaxation.status_name if relaxation is not None else None
     relaxation_bound = relaxation.upper_bound_units if relaxation is not None else None
+    if (
+        incumbent is not None
+        and relaxation_bound is not None
+        and relaxation_bound < incumbent[1].total_reward_units
+    ):
+        raise RuntimeError("master bound contradicts a verified incumbent")
     relaxation_systems = relaxation.routed_systems if relaxation is not None else 0
     preprocessing_wall_time_seconds = (
         relaxation_wall_time + decomposition.subproblem_wall_time_seconds
@@ -1573,7 +1772,29 @@ def solve_exact(
     preprocessing_branches = relaxation_branches + decomposition.subproblem_branches
     preprocessing_conflicts = relaxation_conflicts + decomposition.subproblem_conflicts
 
-    if decomposition.simulation is not None:
+    if incumbent is not None and relaxation_bound == incumbent[1].total_reward_units:
+        if solver_config.minimize_finish_time_after_proof:
+            refinement = _refine_fixed_selection_finish_time(
+                prepared, graph, incumbent[0], solver_config
+            )
+            preprocessing_wall_time_seconds += refinement.wall_time_seconds
+            preprocessing_branches += refinement.branches
+            preprocessing_conflicts += refinement.conflicts
+            decomposition = replace(
+                decomposition,
+                subproblem_wall_time_seconds=(
+                    decomposition.subproblem_wall_time_seconds + refinement.wall_time_seconds
+                ),
+            )
+            if (
+                refinement.simulation is not None
+                and refinement.simulation.finish_seconds < incumbent[1].finish_seconds
+            ):
+                incumbent = (incumbent[0], refinement.simulation)
+        decomposition = replace(
+            decomposition, simulation=incumbent[1], selected_contract_ids=incumbent[0]
+        )
+        assert decomposition.simulation is not None
         if relaxation_bound != decomposition.simulation.total_reward_units:
             raise RuntimeError("decomposition route does not meet the rigorous master bound")
         certificate = OptimalityCertificate(
@@ -1615,6 +1836,8 @@ def solve_exact(
         )
 
     if decomposition.proven_infeasible:
+        if incumbent is not None:
+            raise RuntimeError("decomposition infeasibility contradicts a verified incumbent")
         certificate = OptimalityCertificate(
             status=ProofStatus.PROVEN_INFEASIBLE,
             solver_status="DECOMPOSITION_INFEASIBLE",
@@ -1657,6 +1880,8 @@ def solve_exact(
         selection_cuts,
         decomposition.learned_infeasibility_cores,
     )
+    if incumbent is not None:
+        _hint_verified_route(route_model, prepared, _simulation_visits(incumbent[1]), incumbent[0])
     validation_error = route_model.model.validate()
     if validation_error:
         raise ValueError(f"invalid or numerically unsafe CP-SAT model: {validation_error}")
@@ -1667,6 +1892,8 @@ def solve_exact(
     )
 
     if reward_status == cp_model.INFEASIBLE:
+        if incumbent is not None:
+            raise RuntimeError("exact infeasibility contradicts a verified incumbent")
         certificate = OptimalityCertificate(
             status=ProofStatus.PROVEN_INFEASIBLE,
             solver_status=reward_solve_stats.status_name,
@@ -1699,7 +1926,7 @@ def solve_exact(
             decomposition_proof_closed=False,
         )
         return SolveResult((), (), 0, 0, certificate)
-    if reward_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    if reward_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE) and incumbent is None:
         certificate = OptimalityCertificate(
             status=ProofStatus.UNKNOWN,
             solver_status=reward_solve_stats.status_name,
@@ -1733,11 +1960,31 @@ def solve_exact(
         )
         return SolveResult((), (), 0, 0, certificate)
 
+    if reward_solve_stats.objective_units is None:
+        assert incumbent is not None
+        pool_reward = sum(item.contract.reward_units for item in prepared.problem.contracts)
+        pool_reward += sum(
+            item.contract.contract.reward_units for item in prepared.problem.active_shipments
+        )
+        reward_solve_stats = replace(
+            reward_solve_stats,
+            objective_units=incumbent[1].total_reward_units,
+            bound_units=relaxation_bound if relaxation_bound is not None else pool_reward,
+            status_name=reward_solve_stats.status_name + "_WITH_INCUMBENT",
+        )
+    elif relaxation_bound is not None and reward_solve_stats.bound_units is not None:
+        reward_solve_stats = replace(
+            reward_solve_stats, bound_units=min(relaxation_bound, reward_solve_stats.bound_units)
+        )
     route_solution_solver = reward_solver
+    route_solution_available = reward_status in (cp_model.OPTIMAL, cp_model.FEASIBLE)
     total_wall_time_seconds = preprocessing_wall_time_seconds + reward_solve_stats.wall_time_seconds
     total_branches = preprocessing_branches + reward_solve_stats.branches
     total_conflicts = preprocessing_conflicts + reward_solve_stats.conflicts
-    if reward_status == cp_model.OPTIMAL and solver_config.minimize_finish_time_after_proof:
+    if (
+        solver_config.minimize_finish_time_after_proof
+        and reward_solve_stats.bound_units == reward_solve_stats.objective_units
+    ):
         if progress:
             progress("Reward proven; refining route duration")
         assert reward_solve_stats.objective_units is not None
@@ -1745,16 +1992,22 @@ def solve_exact(
         route_model.model.minimize(route_model.finish_time_seconds)
         finish_time_solver = _new_solver(solver_config, use_secondary_time_limit=True)
         finish_time_status = finish_time_solver.solve(route_model.model)
+        total_wall_time_seconds += finish_time_solver.wall_time
+        total_branches += finish_time_solver.num_branches
+        total_conflicts += finish_time_solver.num_conflicts
         if finish_time_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             route_solution_solver = finish_time_solver
-            total_wall_time_seconds += finish_time_solver.wall_time
-            total_branches += finish_time_solver.num_branches
-            total_conflicts += finish_time_solver.num_conflicts
+            route_solution_available = True
 
     # A solver assignment is not trusted as a route until the independent simulator accepts it.
     if progress:
         progress("Independently verifying the route and proof")
-    planned_visits, selected_contract_ids = _extract_visits(route_model, route_solution_solver)
+    if route_solution_available:
+        planned_visits, selected_contract_ids = _extract_visits(route_model, route_solution_solver)
+    else:
+        assert incumbent is not None
+        selected_contract_ids, simulation = incumbent
+        planned_visits = _simulation_visits(simulation)
     verified_route = simulate_and_verify(
         prepared.problem,
         graph,
@@ -1794,11 +2047,13 @@ def solve_exact(
         reference_verified = True
 
     assert reward_solve_stats.bound_units is not None
+    if reward_solve_stats.bound_units < reward_solve_stats.objective_units:
+        raise RuntimeError("reward bound contradicts the independently verified route")
     absolute_gap_units = max(0, reward_solve_stats.bound_units - reward_solve_stats.objective_units)
     relative_gap = absolute_gap_units / max(1, abs(reward_solve_stats.objective_units))
     proof_status = (
         ProofStatus.PROVEN_OPTIMAL
-        if reward_status == cp_model.OPTIMAL
+        if reward_status == cp_model.OPTIMAL or absolute_gap_units == 0
         else ProofStatus.FEASIBLE_NOT_PROVEN
     )
     certificate = OptimalityCertificate(
