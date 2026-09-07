@@ -8,7 +8,7 @@ version = "1.5.0"
 description = "Proof-capable route optimization for EVE Online public courier contracts"
 readme = "README.md"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 authors = [{name = "Pascal Rat"}]
 requires-python = ">=3.12"
 keywords = ["eve-online", "courier", "route-optimization", "cp-sat"]
@@ -42,9 +42,11 @@ eve-courier = "eve_courier_optimizer.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+namespaces = false
 
 [tool.setuptools.package-data]
-eve_courier_optimizer = ["data/*.sqlite3", "web/*.html", "web/*.css", "web/*.js"]
+eve_courier_optimizer = ["data/*.sqlite3"]
+"eve_courier_optimizer.web" = ["assets/*.html", "assets/*.css", "assets/*.js"]
 
 [tool.ruff]
 target-version = "py312"

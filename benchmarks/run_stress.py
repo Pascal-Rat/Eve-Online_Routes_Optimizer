@@ -13,25 +13,20 @@ from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from pathlib import Path
 
-from eve_courier_optimizer import solver as solver_module
+import eve_courier_optimizer
+from benchmarks.run_empire import FIXTURE, PROFILES, _constraints, load_empire_graph
 from eve_courier_optimizer.domain import (
     CollateralMode,
+    ContractSnapshot,
     PlanningConstraints,
     PublicCourierContract,
     SecurityPolicy,
     TravelTimeModel,
 )
-from eve_courier_optimizer.planning import PreparedProblem, prepare_problem
-from eve_courier_optimizer.sde import (
-    Region,
-    SdeMetadata,
-    SolarSystem,
-    UniverseGraph,
-)
-from eve_courier_optimizer.snapshot import ContractSnapshot, read_snapshot
-from eve_courier_optimizer.solver import SolverConfig, solve_exact
-
-from .run_empire import FIXTURE, PROFILES, _constraints, load_empire_graph
+from eve_courier_optimizer.eve.snapshot_file import read_snapshot
+from eve_courier_optimizer.optimization import RouteOptimizer, SolverConfig
+from eve_courier_optimizer.routing.route_problem import RouteProblem
+from eve_courier_optimizer.routing.universe import Region, SdeMetadata, SolarSystem, UniverseGraph
 
 CASES = (
     "empire_dst",
@@ -45,7 +40,7 @@ CASES = (
 )
 
 
-def prepare_case(name: str, *, seed: int = 17) -> tuple[UniverseGraph, PreparedProblem]:
+def prepare_case(name: str, *, seed: int = 17) -> tuple[UniverseGraph, RouteProblem]:
     if name.startswith("empire_"):
         graph = load_empire_graph()
         snapshot = read_snapshot(FIXTURE)
@@ -59,7 +54,7 @@ def prepare_case(name: str, *, seed: int = 17) -> tuple[UniverseGraph, PreparedP
             )
         elif name.endswith("rolling"):
             constraints = replace(constraints, collateral_mode=CollateralMode.ROLLING)
-        return graph, prepare_problem(snapshot, graph, constraints)
+        return graph, RouteProblem.from_snapshot(snapshot, graph, constraints)
     now = datetime(2026, 8, 6, tzinfo=UTC)
     corridor = name == "corridor_capacity"
     count = 9 if corridor else 25
@@ -110,10 +105,10 @@ def prepare_case(name: str, *, seed: int = 17) -> tuple[UniverseGraph, PreparedP
         required_system_ids=frozenset({5, 21}) if name == "clustered_waypoints" else frozenset(),
         finish_system_id=25 if name == "clustered_waypoints" else None,
     )
-    return graph, prepare_problem(snapshot, graph, constraints)
+    return graph, RouteProblem.from_snapshot(snapshot, graph, constraints)
 
 
-def main(*, experiment: dict[str, str] | None = None) -> int:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", nargs="+", choices=CASES, default=CASES)
     parser.add_argument("--time-limit", type=float, default=30)
@@ -130,7 +125,7 @@ def main(*, experiment: dict[str, str] | None = None) -> int:
         minimize_finish_time_after_proof=False,
         log_search_progress=args.log,
     )
-    source_root = Path(solver_module.__file__).parent
+    source_root = Path(eve_courier_optimizer.__file__).parent
     source_hash = hashlib.sha256()
     for source in sorted(source_root.rglob("*.py")):
         source_hash.update(str(source.relative_to(source_root)).encode() + b"\0")
@@ -138,13 +133,13 @@ def main(*, experiment: dict[str, str] | None = None) -> int:
     runner_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     for name in args.cases:
         start = time.perf_counter()
-        graph, prepared = prepare_case(name, seed=args.seed)
+        graph, problem = prepare_case(name, seed=args.seed)
         preparation = time.perf_counter() - start
-        result = solve_exact(
-            prepared,
+        result = RouteOptimizer(
+            problem,
             graph,
             config=config,
-        )
+        ).solve()
         c = result.certificate
         row = dict(
             case=name,
@@ -156,7 +151,7 @@ def main(*, experiment: dict[str, str] | None = None) -> int:
             source_sha256=source_hash.hexdigest(),
             runner_sha256=runner_hash,
             config=asdict(config),
-            eligible=len(prepared.problem.contracts),
+            eligible=len(problem.contracts),
             seconds=args.time_limit,
             elapsed=time.perf_counter() - start,
             preparation=preparation,
@@ -166,6 +161,8 @@ def main(*, experiment: dict[str, str] | None = None) -> int:
             bound=c.best_bound_units,
             gap=c.relative_gap,
             selected=len(result.selected_contract_ids),
+            selected_ids=result.selected_contract_ids,
+            finish_seconds=result.finish_seconds,
             verified=c.feasibility_verified,
             fingerprint=c.problem_sha256,
             master_status=c.system_relaxation_status,
@@ -174,7 +171,6 @@ def main(*, experiment: dict[str, str] | None = None) -> int:
             iterations=c.decomposition_iterations,
             cuts=c.decomposition_learned_cuts,
             oracle_wall=c.decomposition_subproblem_wall_time_seconds,
-            **({"experiment": experiment} if experiment is not None else {}),
         )
         encoded = json.dumps(row, sort_keys=True)
         print(encoded, flush=True)

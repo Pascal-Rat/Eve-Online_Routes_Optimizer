@@ -5,11 +5,15 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import UTC, datetime
-from decimal import ROUND_FLOOR, Decimal
+from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
 
-from .domain import (
+from eve_courier_optimizer.application.plan_file import write_solve_result
+from eve_courier_optimizer.application.planner import CourierPlanner
+from eve_courier_optimizer.application.trip_file import read_trip, write_trip
+from eve_courier_optimizer.domain import (
     CollateralMode,
+    ContractSnapshot,
     PlanningConstraints,
     ProofStatus,
     SecurityBand,
@@ -21,43 +25,41 @@ from .domain import (
     isk_units_to_decimal,
     parse_human_isk,
 )
-from .esi import EsiClient, EsiResponseCache, default_cache_path
-from .execution import (
-    extend_execution_horizon,
-    read_execution_state,
-    record_delivery,
-    record_pickup,
-    record_route_system,
-    write_execution_state,
-)
-from .planning import rank_single_contracts
-from .reporting import write_solve_result
-from .scanner import (
+from eve_courier_optimizer.eve.contract_scan import (
     DEFAULT_CONTRACT_SCAN_WORKERS,
     MAX_CONTRACT_SCAN_WORKERS,
 )
-from .sde import UniverseGraph, load_bundled_graph
-from .service import PlannerService
-from .snapshot import ContractSnapshot, read_snapshot, write_snapshot
-from .solver import SolverConfig
-from .threat_intel import (
+from eve_courier_optimizer.eve.esi import EsiClient, default_cache_path
+from eve_courier_optimizer.eve.http import ResponseCache
+from eve_courier_optimizer.eve.snapshot_file import read_snapshot, write_snapshot
+from eve_courier_optimizer.eve.zkill import (
     DEFAULT_THREAT_WINDOW_SECONDS,
     ZkillClient,
     default_zkill_cache_path,
-    threat_avoided_systems,
 )
-from .webapp import default_web_workspace, run_local_web_ui
+from eve_courier_optimizer.optimization import SolverConfig
+from eve_courier_optimizer.routing.route_problem import RouteProblem
+from eve_courier_optimizer.routing.security import observed_security_policy
+from eve_courier_optimizer.routing.universe import UniverseGraph, load_bundled_graph
+from eve_courier_optimizer.web.server import run_local_web_ui
+from eve_courier_optimizer.web.workspace import default_workspace_path
 
 
 def _positive_decimal(value: str) -> Decimal:
-    parsed = Decimal(value)
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as error:
+        raise argparse.ArgumentTypeError("value must be a number") from error
     if not parsed.is_finite() or parsed <= 0:
         raise argparse.ArgumentTypeError("value must be a positive finite number")
     return parsed
 
 
 def _nonnegative_decimal(value: str) -> Decimal:
-    parsed = Decimal(value)
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as error:
+        raise argparse.ArgumentTypeError("value must be a number") from error
     if not parsed.is_finite() or parsed < 0:
         raise argparse.ArgumentTypeError("value must be a non-negative finite number")
     return parsed
@@ -104,40 +106,6 @@ def _parse_time(value: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _resolve_system(graph: UniverseGraph, value: str) -> int:
-    try:
-        system_id = int(value)
-    except ValueError:
-        matches = [
-            system.system_id
-            for system in graph.systems.values()
-            if system.name.casefold() == value.casefold()
-        ]
-        if len(matches) != 1:
-            raise ValueError(f"could not resolve unique system {value!r}") from None
-        return matches[0]
-    if system_id not in graph.systems:
-        raise ValueError(f"unknown system ID {system_id}")
-    return system_id
-
-
-def _resolve_region(graph: UniverseGraph, value: str) -> int:
-    try:
-        region_id = int(value)
-    except ValueError:
-        matches = [
-            region.region_id
-            for region in graph.regions.values()
-            if region.name.casefold() == value.casefold()
-        ]
-        if len(matches) != 1:
-            raise ValueError(f"could not resolve unique region {value!r}") from None
-        return matches[0]
-    if region_id not in graph.regions:
-        raise ValueError(f"unknown region ID {region_id}")
-    return region_id
-
-
 def _security_policy(
     graph: UniverseGraph,
     arguments: argparse.Namespace,
@@ -155,55 +123,17 @@ def _security_policy(
         "any": frozenset(SecurityBand),
     }
     manually_avoided_system_ids = frozenset(
-        _resolve_system(graph, item) for item in arguments.avoid_system
+        graph.resolve_system(item) for item in arguments.avoid_system
     )
-    gank_ship_kill_threshold = arguments.gank_ship_kill_threshold
-    gank_activity_fetched_at = None
-    gank_avoided_system_ids: frozenset[int] = frozenset()
-    start_system_id = _resolve_system(graph, arguments.start)
-    if gank_ship_kill_threshold is not None:
-        if snapshot.system_kills_fetched_at is None:
-            raise ValueError(
-                "gank awareness needs system-kill activity; create a fresh snapshot with scan"
-            )
-        gank_avoided_system_ids = frozenset(
-            item.system_id
-            for item in snapshot.system_kill_activity
-            if item.ship_kills >= gank_ship_kill_threshold and item.system_id != start_system_id
-        )
-        gank_activity_fetched_at = snapshot.system_kills_fetched_at
-    threat_categories = frozenset(ThreatCategory(item) for item in arguments.avoid_threat)
-    threat_avoided_system_ids: frozenset[int] = frozenset()
-    if threat_categories:
-        if snapshot.threat_intel_fetched_at is None:
-            raise ValueError(
-                "gate-threat awareness needs zKill intel; scan with --threat-intel first"
-            )
-        threat_avoided_system_ids = threat_avoided_systems(
-            snapshot.gate_threat_events,
-            threat_categories,
-            minimum_events=arguments.threat_min_events,
-            exempt_system_ids=frozenset({start_system_id}),
-        )
-    return SecurityPolicy(
+    return observed_security_policy(
+        snapshot,
         minimum_security=None,
-        avoided_system_ids=manually_avoided_system_ids,
         allowed_bands=allowed_bands_by_option[arguments.security],
-        gank_avoided_system_ids=gank_avoided_system_ids,
-        gank_ship_kill_threshold=gank_ship_kill_threshold,
-        gank_activity_fetched_at=gank_activity_fetched_at,
-        threat_avoided_system_ids=threat_avoided_system_ids,
-        threat_categories=threat_categories,
-        threat_min_events=arguments.threat_min_events if threat_categories else None,
-        threat_intel_fetched_at=(snapshot.threat_intel_fetched_at if threat_categories else None),
-        threat_window_seconds=snapshot.threat_window_seconds if threat_categories else None,
-        threat_gate_radius_m=snapshot.threat_gate_radius_m if threat_categories else None,
-        threat_coverage_region_ids=(
-            frozenset(snapshot.threat_coverage_region_ids) if threat_categories else frozenset()
-        ),
-        threat_incomplete_region_ids=(
-            frozenset(snapshot.threat_incomplete_region_ids) if threat_categories else frozenset()
-        ),
+        avoided_system_ids=manually_avoided_system_ids,
+        activity_threshold=arguments.gank_ship_kill_threshold,
+        threat_categories=frozenset(ThreatCategory(value) for value in arguments.avoid_threat),
+        threat_min_events=arguments.threat_min_events,
+        exempt_system_ids=frozenset({graph.resolve_system(arguments.start)}),
     )
 
 
@@ -213,7 +143,7 @@ def _constraints(
     snapshot: ContractSnapshot,
 ) -> PlanningConstraints:
     return PlanningConstraints(
-        start_system_id=_resolve_system(graph, arguments.start),
+        start_system_id=graph.resolve_system(arguments.start),
         cargo_capacity_units=cargo_capacity_to_units(arguments.cargo_m3),
         collateral_budget_units=isk_to_units(arguments.collateral_isk),
         horizon_seconds=_hours_to_seconds(arguments.hours),
@@ -230,10 +160,10 @@ def _constraints(
         security=_security_policy(graph, arguments, snapshot),
         return_to_start=arguments.loop,
         required_system_ids=frozenset(
-            _resolve_system(graph, value) for value in arguments.require_system
+            graph.resolve_system(value) for value in arguments.require_system
         ),
         finish_system_id=(
-            _resolve_system(graph, arguments.finish) if arguments.finish is not None else None
+            graph.resolve_system(arguments.finish) if arguments.finish is not None else None
         ),
         max_simultaneous_contracts=arguments.max_simultaneous_contracts,
     )
@@ -333,16 +263,16 @@ def _add_solver_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _run_scan(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
-    region_ids = tuple(_resolve_region(graph, value) for value in arguments.region)
+    region_ids = tuple(graph.resolve_region(value) for value in arguments.region)
     threat_region_ids = (
-        tuple(_resolve_region(graph, value) for value in arguments.threat_region)
+        tuple(graph.resolve_region(value) for value in arguments.threat_region)
         if arguments.threat_region
         else None
     )
-    cache = EsiResponseCache(arguments.cache)
+    cache = ResponseCache(arguments.cache)
     client = EsiClient(cache=cache)
-    zkill = ZkillClient(cache=EsiResponseCache(arguments.zkill_cache))
-    snapshot = PlannerService(graph, client, zkill).scan(
+    zkill = ZkillClient(cache=ResponseCache(arguments.zkill_cache))
+    snapshot = CourierPlanner(graph, client, zkill).scan(
         region_ids,
         include_threat_intel=arguments.threat_intel,
         threat_window_seconds=arguments.threat_window_hours * 3_600,
@@ -361,14 +291,15 @@ def _run_scan(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
 def _run_rank(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
     snapshot = read_snapshot(arguments.snapshot)
     constraints = _constraints(graph, arguments, snapshot)
-    prepared = PlannerService(graph, EsiClient()).prepare(
+    problem = RouteProblem.from_snapshot(
         snapshot,
+        graph,
         constraints,
         max_candidates=arguments.max_candidates,
     )
     print("contract_id reward_ISK solo_jumps solo_minutes ISK/hour reward/collateral")
-    for score in rank_single_contracts(prepared)[: arguments.limit]:
-        contract = score.contract.contract
+    for score in problem.rank_contracts()[: arguments.limit]:
+        contract = score.contract
         print(
             f"{contract.contract_id} "
             f"{isk_units_to_decimal(contract.reward_units)} "
@@ -376,9 +307,9 @@ def _run_rank(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
             f"{score.reward_per_hour_isk:.0f} {score.reward_to_collateral:.5f}"
         )
     print(
-        f"eligible={prepared.problem.scope.eligible_contracts} "
-        f"policy_exclusions={dict(prepared.problem.scope.policy_exclusions)} "
-        f"safe_reductions={dict(prepared.problem.scope.safe_reductions)}"
+        f"eligible={problem.scope.eligible_contracts} "
+        f"policy_exclusions={dict(problem.scope.policy_exclusions)} "
+        f"safe_reductions={dict(problem.scope.safe_reductions)}"
     )
     return 0
 
@@ -401,20 +332,21 @@ def _print_solve_summary(result_path: Path, result_status: ProofStatus, result: 
 def _run_solve(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
     snapshot = read_snapshot(arguments.snapshot)
     constraints = _constraints(graph, arguments, snapshot)
-    service = PlannerService(graph, EsiClient())
-    prepared, result = service.solve(
+    planner = CourierPlanner(graph, EsiClient())
+    plan = planner.solve(
         snapshot,
         constraints,
         max_candidates=arguments.max_candidates,
         solver_config=_solver_config(arguments),
     )
-    write_solve_result(arguments.output, result, prepared.problem)
+    problem, result = plan.problem, plan.result
+    write_solve_result(arguments.output, result, problem)
     if arguments.state_output is not None and result.certificate.feasibility_verified:
         departure = (
             _parse_time("now") if arguments.planning_time == "now" else constraints.snapshot_time
         )
-        state = service.arm(prepared, result, at=departure)
-        write_execution_state(arguments.state_output, state)
+        state = planner.arm(plan, at=departure)
+        write_trip(arguments.state_output, state)
     _print_solve_summary(arguments.output, result.certificate.status, result)
     if result.certificate.objective_units is not None:
         print(
@@ -432,29 +364,29 @@ def _run_solve(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
 
 def _run_replan(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
     snapshot = read_snapshot(arguments.snapshot)
-    state = read_execution_state(arguments.state)
-    service = PlannerService(graph, EsiClient())
+    state = read_trip(arguments.state)
+    planner = CourierPlanner(graph, EsiClient())
     at = None if arguments.planning_time == "snapshot" else _parse_time(arguments.planning_time)
-    prepared, result = service.replan(
+    plan = planner.replan(
         snapshot,
         state,
         at=at,
         max_candidates=arguments.max_candidates,
         solver_config=_solver_config(arguments),
     )
-    write_solve_result(arguments.output, result, prepared.problem)
+    problem, result = plan.problem, plan.result
+    write_solve_result(arguments.output, result, problem)
     if arguments.state_output is not None and result.certificate.feasibility_verified:
-        next_state = service.arm(
-            prepared,
-            result,
+        next_state = planner.arm(
+            plan,
             at=(
                 _parse_time("now")
                 if arguments.planning_time == "now"
-                else prepared.problem.constraints.snapshot_time
+                else problem.constraints.snapshot_time
             ),
             previous=state,
         )
-        write_execution_state(arguments.state_output, next_state)
+        write_trip(arguments.state_output, next_state)
     _print_solve_summary(arguments.output, result.certificate.status, result)
     return _proof_exit(
         arguments,
@@ -464,26 +396,26 @@ def _run_replan(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
 
 
 def _run_advance(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
-    state = read_execution_state(arguments.state)
+    state = read_trip(arguments.state)
     at = _parse_time(arguments.at)
     if arguments.action == "pickup":
         if arguments.contract_id is None:
             raise ValueError("pickup requires --contract-id")
         snapshot = read_snapshot(arguments.snapshot) if arguments.snapshot is not None else None
-        updated = record_pickup(state, snapshot, graph, arguments.contract_id, at)
+        updated = state.pick_up(snapshot, graph, arguments.contract_id, at)
         subject = str(arguments.contract_id)
     elif arguments.action == "delivery":
         if arguments.contract_id is None:
             raise ValueError("delivery requires --contract-id")
-        updated = record_delivery(state, arguments.contract_id, at)
+        updated = state.deliver(arguments.contract_id, at)
         subject = str(arguments.contract_id)
     else:
         if arguments.system is None:
             raise ValueError("route-system requires --system")
-        system_id = _resolve_system(graph, arguments.system)
-        updated = record_route_system(state, system_id, at)
+        system_id = graph.resolve_system(arguments.system)
+        updated = state.reach_system(system_id, at)
         subject = graph.systems[system_id].name
-    write_execution_state(arguments.output, updated)
+    write_trip(arguments.output, updated)
     print(
         f"state: recorded {arguments.action} at {subject}; "
         f"active={len(updated.active_shipments)} -> {arguments.output}"
@@ -533,7 +465,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scan.set_defaults(handler="scan")
 
-    rank = subparsers.add_parser("rank", help="iteration-2 solo courier profitability ranking")
+    rank = subparsers.add_parser("rank", help="rank individual couriers by reward per travel hour")
     rank.add_argument("--snapshot", type=Path, required=True)
     rank.add_argument("--limit", type=int, default=20)
     _add_planning_arguments(rank)
@@ -590,7 +522,7 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument(
         "--workspace",
         type=Path,
-        default=default_web_workspace(),
+        default=default_workspace_path(),
         help="directory for the cached snapshot, plan and live execution state",
     )
     web.add_argument(
@@ -624,12 +556,10 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.handler == "advance":
             return _run_advance(arguments, graph)
         if arguments.handler == "extend":
-            state = extend_execution_horizon(
-                read_execution_state(arguments.state),
-                additional_seconds=arguments.minutes * 60,
-                at=_parse_time(arguments.at),
+            state = read_trip(arguments.state).extend_horizon(
+                additional_seconds=arguments.minutes * 60, at=_parse_time(arguments.at)
             )
-            write_execution_state(arguments.output, state)
+            write_trip(arguments.output, state)
             print(f"planning horizon extended to {state.session_deadline.isoformat()}")
             return 0
         if arguments.handler == "web":

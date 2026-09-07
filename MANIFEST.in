@@ -1,0 +1,11 @@
+include CONTRIBUTING.md SECURITY.md THIRD_PARTY_NOTICES.md
+include docs/BENCHMARKS.md docs/DOMAIN.md docs/INTERFACES.md docs/OPTIMIZATION.md
+include docs/assets/ui-planner.png
+include benchmarks/*.py
+include benchmarks/frozen_universe.json benchmarks/empire_snapshot_2026-08-06.json
+include benchmarks/empire_fixture_manifest.json benchmarks/empire_sde_3458726.sqlite3.gz
+recursive-include tests *.py
+recursive-include browser_tests *.py
+include tools/build_sde.py
+prune benchmarks/results
+global-exclude __pycache__ *.py[cod]

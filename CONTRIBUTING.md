@@ -1,84 +1,84 @@
-# Contributing
+# Development
 
-Changes are welcome when they preserve the project's narrow proof claims and reproducible inputs.
-
-## Development setup
+Install Python 3.12+ and an editable development environment:
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/python -m pip install -e ".[dev]"
-```
-
-Run every release gate before submitting a change:
-
-```bash
-.venv/bin/ruff check src tools tests benchmarks
-.venv/bin/mypy src tools tests benchmarks
-.venv/bin/pytest
-PYTHONPATH=src .venv/bin/python -m benchmarks.run_frozen --time-limit 10
-```
-
-The test command enforces branch-aware coverage of at least 85%, including spawned workers.
-Also run the real frozen Empire reward/proof regression:
-
-```bash
-PYTHONPATH=src .venv/bin/python -m benchmarks.run_empire --time-limit 60
-```
-
-For UI changes, install the optional browser test dependencies and run the Chromium workflows:
-
-```bash
 .venv/bin/python -m pip install -e ".[dev,browser]"
 .venv/bin/python -m playwright install chromium
-.venv/bin/ruff check browser_tests
-.venv/bin/mypy browser_tests
-.venv/bin/pytest browser_tests --no-cov --browser chromium --tracing retain-on-failure
 ```
 
-Browser tests use local synthetic ESI responses. CI runs them separately and retains failure traces.
-They cover scan/rank/solve/arming, reloads, real progress after infeasible replans, horizon recovery,
-zero-denominator scores, and job cancellation.
+## Find the code
 
-## Proof-sensitive changes
+The two entry points are [`cli.py`](src/eve_courier_optimizer/cli.py) and
+[`web/server.py`](src/eve_courier_optimizer/web/server.py). Both reach
+[`CourierPlanner`](src/eve_courier_optimizer/application/planner.py) for solving and replanning.
 
-Any change to preprocessing, arc generation, constraints, objectives, bound conversion, or route
-extraction needs tests that would fail if a feasible route were incorrectly removed or an infeasible
-route accepted.
+| Responsibility | Code to read |
+| --- | --- |
+| Browser input, saved session, responses | `web/requests.py`, `web/workspace.py`, `web/responses.py` |
+| Accepted contracts and real pickup/delivery progress | `application/courier_trip.py`: `CourierTrip` |
+| ESI/zKill observations and CCP universe data | `eve/contract_scan.py`, `eve/esi.py`, `eve/zkill.py`, `eve/sde_build.py` |
+| Permitted stargate paths and eligible contracts | `routing/universe.py`, `routing/security.py`, `routing/route_problem.py` |
+| Solver workflow and budgets | `optimization/optimizer.py`, `optimization/solver_config.py` |
+| Mathematical variables, objective and constraints | `optimization/models/`: pickup/delivery, system tour, selection bounds |
+| Incumbent construction and exact selection searches | `optimization/search/` |
+| Independent feasibility and small-instance optimality checks | `verification/route_replay.py`, `verification/exhaustive_optimum.py` |
 
-- Safe preprocessing must include a mathematical reason it cannot lower the optimum.
-- Heuristic deletion must be opt-in and set `scope_untruncated=false`.
-- A solution hint must not constrain the feasible set.
-- New solver state must enter independent verification when it affects route feasibility.
-- New mathematical inputs must enter `problem_sha256` and the plan artifact.
-- Status text must distinguish a feasible incumbent from a closed optimality bound.
+```mermaid
+flowchart LR
+    request[PlanRequest] --> constraints[PlanningConstraints]
+    snapshot[ContractSnapshot] --> problem[RouteProblem.from_snapshot]
+    constraints --> problem
+    problem --> optimizer[RouteOptimizer.solve]
+    optimizer --> plan[RoutePlan]
+    plan --> departure[CourierPlanner.arm]
+    departure --> trip[CourierTrip]
+    trip --> replan[CourierPlanner.replan]
+    replan --> problem
+```
 
-For small locked-mode cases, compare CP-SAT to `reference_solver.py`. Add or extend a frozen
-benchmark for performance work that targets a specific operating profile.
+`domain.py` defines shared immutable contracts, observations, constraints and results. `RouteProblem`
+owns the eligible pool, mandatory shipments, distances and exclusion scope. The optimizer consumes
+that problem; its models receive search hints explicitly. `CourierTrip` owns progress transitions,
+while `trip_file.py` and `plan_file.py` own the versioned files. `PlanningWorkspace` saves the current
+snapshot, proposed plan and trip for the local HTTP interface.
 
-## Data/API changes
+Models do not call search algorithms. Independent verification does not import the optimizer or
+external clients. Tests enforce these dependency boundaries and follow the same package structure.
+The browser uses native JavaScript modules served directly from `web/assets`; it targets desktop
+windows at least 1024 pixels wide and has no frontend build step.
 
-- Never query live ESI or zKillboard from inside the optimizer.
-- Persist observations first, including timestamps, scope, failure/incompleteness metadata, and source
-  identity.
-- Keep request behavior sequential, cache-aware, and within the provider's published rules.
-- Do not commit OAuth secrets, tokens, personal route artifacts, or runtime cache databases.
-- When the SDE schema changes, keep the builder atomic and retain an integrity check.
+## Validate
 
-Live-network tests must be explicitly marked and optional. Default CI uses frozen fixtures.
+```bash
+.venv/bin/ruff check src tools tests benchmarks browser_tests
+.venv/bin/ruff format --check src tools tests benchmarks browser_tests
+.venv/bin/mypy src tools tests benchmarks browser_tests
+.venv/bin/pytest
+.venv/bin/pytest browser_tests --no-cov --browser chromium --tracing retain-on-failure
+.venv/bin/python -m benchmarks.run_frozen --time-limit 10
+.venv/bin/python -m benchmarks.run_empire --time-limit 60 --workers 4
+.venv/bin/python -m pip wheel . --no-deps -w dist
+```
 
-## Code style
+Tests enforce at least 85% branch-inclusive coverage, including spawned workers. Browser tests use
+synthetic local responses and exercise scanning, ranking, solving, arming, persistence, infeasible
+recovery, cancellation and asynchronous autocomplete. No frontend compiler or runtime dependency
+is needed beyond the browser. Live-network tests must remain opt-in.
 
-Python is 3.12+, Ruff-clean, and checked with strict Mypy. Domain records are immutable where
-practical. Keep transport, persistence, mathematical, verification, and presentation concerns in
-their existing modules rather than adding solver logic to CLI or JavaScript code.
+For solver or preprocessing changes, follow [benchmark methodology](docs/BENCHMARKS.md). Protect
+small hand-checkable optima and feasibility boundaries as well as representative workloads.
+Keep generated benchmark results, diagnostic dumps and validation logs out of commits.
+A safe reduction needs a mathematical reason it cannot remove an optimum. Heuristic caps must
+remain explicit and mark proof scope. An infeasible core needs an actual infeasibility proof; a
+relaxation incumbent must never be reported as a reward ceiling.
 
-## Documentation and license
+Keep independent verification independent: do not share solver state propagation or production
+search with the exhaustive checker. New mathematical inputs belong in the problem fingerprint
+and persisted model. Preserve accepted-state compatibility when modifying file schemas.
 
-Update the mathematical model, proof scope, JSON formats and relevant operator guide when behavior
-changes. `CHANGELOG.md` stays release-level rather than becoming a commit diary; add an entry only
-when the change belongs in operator-facing release notes. Use `$$` blocks for display math so
-formulas render in GitHub and common Markdown viewers, and explain important equations in plain
-language immediately nearby.
-
-Contributions are distributed under the [MIT License](LICENSE). Third-party EVE/CCP material remains
-subject to the notices and terms described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[Domain rules](docs/DOMAIN.md), [optimization](docs/OPTIMIZATION.md), and
+[interfaces](docs/INTERFACES.md) document the non-obvious contracts. Keep explanations there concise;
+source code should reveal ordinary control flow. See [SECURITY.md](SECURITY.md) and
+[third-party notices](THIRD_PARTY_NOTICES.md) before publishing data or changing integrations.

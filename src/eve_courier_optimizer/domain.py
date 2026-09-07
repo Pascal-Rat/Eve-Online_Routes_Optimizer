@@ -10,8 +10,8 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal
+from datetime import UTC, datetime, timedelta
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Final
 
@@ -33,7 +33,10 @@ _ISK_PATTERN: Final = re.compile(
 def _decimal(value: Decimal | int | float | str) -> Decimal:
     if isinstance(value, Decimal):
         return value
-    return Decimal(str(value))
+    try:
+        return Decimal(str(value))
+    except InvalidOperation as error:
+        raise ValueError("expected a decimal number") from error
 
 
 def cargo_volume_to_units(value_m3: Decimal | int | float | str) -> int:
@@ -114,6 +117,20 @@ class CollateralMode(StrEnum):
 class ActionKind(StrEnum):
     PICKUP = "pickup"
     DELIVERY = "delivery"
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedAction:
+    action: ActionKind
+    contract_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedWaypoint:
+    system_id: int
+
+
+type PlannedVisit = PlannedAction | PlannedWaypoint
 
 
 class TravelLegKind(StrEnum):
@@ -206,13 +223,16 @@ class GateThreatEvent:
     zkill_labels: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if min(
-            self.killmail_id,
-            self.system_id,
-            self.region_id,
-            self.gate_id,
-            self.victim_ship_type_id,
-        ) <= 0:
+        if (
+            min(
+                self.killmail_id,
+                self.system_id,
+                self.region_id,
+                self.gate_id,
+                self.victim_ship_type_id,
+            )
+            <= 0
+        ):
             raise ValueError("gate-threat identifiers must be positive")
         if self.occurred_at.tzinfo is None:
             raise ValueError("gate-threat timestamp must be timezone-aware")
@@ -253,16 +273,111 @@ class PublicCourierContract:
         if self.date_expired.tzinfo is None:
             raise ValueError("date_expired must be timezone-aware")
 
+    def last_pickup_second(self, departure: datetime) -> int:
+        """Last integral arrival strictly before listing expiry, including fractional seconds."""
+        remaining = self.date_expired - departure
+        microseconds = (
+            remaining.days * 86_400 + remaining.seconds
+        ) * 1_000_000 + remaining.microseconds
+        return (microseconds - 1) // 1_000_000
+
 
 @dataclass(frozen=True, slots=True)
-class RoutableContract:
-    contract: PublicCourierContract
+class ContractSnapshot:
+    fetched_at: datetime
+    compatibility_date: str
+    sde_build_number: int
+    region_ids: tuple[int, ...]
+    contracts: tuple[PublicCourierContract, ...]
+    system_kills_fetched_at: datetime | None = None
+    system_kill_activity: tuple[SystemKillActivity, ...] = ()
+    threat_intel_fetched_at: datetime | None = None
+    threat_window_seconds: int | None = None
+    threat_gate_radius_m: int | None = None
+    threat_coverage_region_ids: tuple[int, ...] = ()
+    threat_incomplete_region_ids: tuple[int, ...] = ()
+    threat_killmails_seen: int = 0
+    gate_threat_events: tuple[GateThreatEvent, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.fetched_at.tzinfo is None:
+            raise ValueError("snapshot time must be timezone-aware")
+        if self.system_kills_fetched_at is not None and self.system_kills_fetched_at.tzinfo is None:
+            raise ValueError("system-kill activity time must be timezone-aware")
+        if self.system_kill_activity and self.system_kills_fetched_at is None:
+            raise ValueError("system-kill activity requires its fetched-at timestamp")
+        if self.threat_intel_fetched_at is not None and self.threat_intel_fetched_at.tzinfo is None:
+            raise ValueError("threat-intel time must be timezone-aware")
+        if self.threat_killmails_seen < 0:
+            raise ValueError("threat killmail count cannot be negative")
+        if self.threat_window_seconds is not None and self.threat_window_seconds <= 0:
+            raise ValueError("threat-intel window must be positive")
+        if self.threat_gate_radius_m is not None and self.threat_gate_radius_m < 0:
+            raise ValueError("threat-intel gate radius cannot be negative")
+        threat_payload_present = bool(
+            self.gate_threat_events
+            or self.threat_coverage_region_ids
+            or self.threat_incomplete_region_ids
+            or self.threat_killmails_seen
+        )
+        if threat_payload_present and self.threat_intel_fetched_at is None:
+            raise ValueError("threat-intel payload requires its fetched-at timestamp")
+        if self.threat_intel_fetched_at is not None and (
+            self.threat_window_seconds is None or self.threat_gate_radius_m is None
+        ):
+            raise ValueError("threat-intel timestamp requires window and gate radius")
+        contract_ids = [contract.contract_id for contract in self.contracts]
+        if len(contract_ids) != len(set(contract_ids)):
+            raise ValueError("snapshot contract IDs must be unique")
+        activity_system_ids = [item.system_id for item in self.system_kill_activity]
+        if len(activity_system_ids) != len(set(activity_system_ids)):
+            raise ValueError("system-kill activity IDs must be unique")
+        killmail_ids = [item.killmail_id for item in self.gate_threat_events]
+        if len(killmail_ids) != len(set(killmail_ids)):
+            raise ValueError("gate-threat killmail IDs must be unique")
+        for label, region_values in (
+            ("coverage", self.threat_coverage_region_ids),
+            ("incomplete", self.threat_incomplete_region_ids),
+        ):
+            if any(region_id <= 0 for region_id in region_values):
+                raise ValueError(f"threat {label} region IDs must be positive")
+            if len(region_values) != len(set(region_values)):
+                raise ValueError(f"threat {label} region IDs must be unique")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RoutableContract(PublicCourierContract):
+    """A public courier whose NPC station endpoints have been resolved in the SDE."""
+
     origin_system_id: int
     destination_system_id: int
 
     def __post_init__(self) -> None:
+        PublicCourierContract.__post_init__(self)
         if self.origin_system_id <= 0 or self.destination_system_id <= 0:
             raise ValueError("system IDs must be positive")
+
+    @classmethod
+    def resolve(
+        cls,
+        contract: PublicCourierContract,
+        origin_system_id: int,
+        destination_system_id: int,
+    ) -> RoutableContract:
+        return cls(
+            contract_id=contract.contract_id,
+            origin_location_id=contract.origin_location_id,
+            destination_location_id=contract.destination_location_id,
+            volume_units=contract.volume_units,
+            collateral_units=contract.collateral_units,
+            reward_units=contract.reward_units,
+            date_expired=contract.date_expired,
+            days_to_complete=contract.days_to_complete,
+            title=contract.title,
+            date_issued=contract.date_issued,
+            origin_system_id=origin_system_id,
+            destination_system_id=destination_system_id,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +395,10 @@ class ActiveShipment:
     def __post_init__(self) -> None:
         if self.deadline.tzinfo is None:
             raise ValueError("active-shipment deadline must be timezone-aware")
+
+    def last_delivery_second(self, departure: datetime) -> int:
+        """Delivery completion is inclusive; a deadline before departure stays negative."""
+        return (self.deadline - departure) // timedelta(seconds=1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +440,8 @@ class SecurityPolicy:
     threat_incomplete_region_ids: frozenset[int] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
+        if self.minimum_security is not None and not math.isfinite(self.minimum_security):
+            raise ValueError("minimum security must be finite")
         if self.allowed_bands is not None and not self.allowed_bands:
             raise ValueError("at least one security band must be allowed")
         if self.gank_ship_kill_threshold is not None and self.gank_ship_kill_threshold <= 0:
@@ -369,9 +490,7 @@ class SecurityPolicy:
             return "gank_activity_policy"
         if self.allowed_bands is not None:
             return (
-                None
-                if security_band(security_status) in self.allowed_bands
-                else "security_policy"
+                None if security_band(security_status) in self.allowed_bands else "security_policy"
             )
         if self.minimum_security is not None and security_status < self.minimum_security:
             return "security_policy"
@@ -443,14 +562,6 @@ class ProblemScope:
 
 
 @dataclass(frozen=True, slots=True)
-class RouteProblem:
-    constraints: PlanningConstraints
-    contracts: tuple[RoutableContract, ...]
-    scope: ProblemScope
-    active_shipments: tuple[ActiveShipment, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
 class RouteStep:
     sequence: int
     action: ActionKind
@@ -475,6 +586,18 @@ class TravelLeg:
     completion_seconds: int
     jump_path: tuple[int, ...]
     contract_id: int | None = None
+
+
+def planned_visits(legs: tuple[TravelLeg, ...]) -> tuple[PlannedVisit, ...]:
+    visits: list[PlannedVisit] = []
+    for leg in legs:
+        if leg.kind is TravelLegKind.WAYPOINT:
+            visits.append(PlannedWaypoint(leg.to_system_id))
+        elif leg.kind in {TravelLegKind.PICKUP, TravelLegKind.DELIVERY}:
+            if leg.contract_id is None:
+                raise ValueError("courier travel leg requires a contract ID")
+            visits.append(PlannedAction(ActionKind(leg.kind.value), leg.contract_id))
+    return tuple(visits)
 
 
 @dataclass(frozen=True, slots=True)

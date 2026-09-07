@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from eve_courier_optimizer.domain import (
+    ContractSnapshot,
     GateEvidence,
     GateThreatEvent,
     PlanningConstraints,
@@ -25,11 +26,10 @@ from eve_courier_optimizer.domain import (
     isk_to_units,
     parse_esi_datetime,
 )
-from eve_courier_optimizer.planning import prepare_problem
-from eve_courier_optimizer.sde import Region, SdeMetadata, SolarSystem, UniverseGraph
-from eve_courier_optimizer.snapshot import ContractSnapshot
-from eve_courier_optimizer.solver import SolverConfig, solve_exact
-from eve_courier_optimizer.threat_intel import threat_avoided_systems
+from eve_courier_optimizer.optimization import RouteOptimizer, SolverConfig
+from eve_courier_optimizer.routing.route_problem import RouteProblem
+from eve_courier_optimizer.routing.security import threat_avoided_systems
+from eve_courier_optimizer.routing.universe import Region, SdeMetadata, SolarSystem, UniverseGraph
 
 FIXTURE = Path(__file__).with_name("frozen_universe.json")
 
@@ -112,9 +112,7 @@ def _snapshot(payload: dict[str, Any]) -> ContractSnapshot:
                 origin_location_id=1_000 + int(origin),
                 destination_location_id=1_000 + int(destination),
                 volume_units=cargo_capacity_to_units(str(volume_m3)),
-                collateral_units=isk_to_units(
-                    Decimal(str(collateral_b)) * Decimal("1000000000")
-                ),
+                collateral_units=isk_to_units(Decimal(str(collateral_b)) * Decimal("1000000000")),
                 reward_units=isk_to_units(Decimal(str(reward_m)) * Decimal("1000000")),
                 date_expired=fetched_at + timedelta(days=1),
                 days_to_complete=1,
@@ -158,8 +156,7 @@ def run_benchmark_scenarios(*, time_limit_seconds: float = 15.0) -> tuple[Benchm
             start_system_id=1,
             cargo_capacity_units=cargo_capacity_to_units(str(raw_scenario["cargo_m3"])),
             collateral_budget_units=isk_to_units(
-                Decimal(str(raw_scenario["collateral_billion_isk"]))
-                * Decimal("1000000000")
+                Decimal(str(raw_scenario["collateral_billion_isk"])) * Decimal("1000000000")
             ),
             horizon_seconds=3_600,
             snapshot_time=snapshot.fetched_at,
@@ -181,22 +178,22 @@ def run_benchmark_scenarios(*, time_limit_seconds: float = 15.0) -> tuple[Benchm
             ),
         )
         started = time.perf_counter()
-        prepared = prepare_problem(snapshot, graph, constraints)
-        solved = solve_exact(
-            prepared,
+        problem = RouteProblem.from_snapshot(snapshot, graph, constraints)
+        solved = RouteOptimizer(
+            problem,
             graph,
             config=SolverConfig(
                 max_time_seconds=time_limit_seconds,
                 num_workers=1,
                 minimize_finish_time_after_proof=False,
             ),
-        )
+        ).solve()
         elapsed = time.perf_counter() - started
         results.append(
             BenchmarkResult(
                 name=str(raw_scenario["name"]),
                 elapsed_seconds=elapsed,
-                eligible_contracts=prepared.problem.scope.eligible_contracts,
+                eligible_contracts=problem.scope.eligible_contracts,
                 selected_contracts=len(solved.selected_contract_ids),
                 reward_isk=str(Decimal(solved.total_reward_units) / Decimal(100)),
                 branches=solved.certificate.branches,

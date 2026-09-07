@@ -15,6 +15,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from eve_courier_optimizer.domain import (
+    ContractSnapshot,
     PlanningConstraints,
     ProofStatus,
     SecurityBand,
@@ -24,11 +25,11 @@ from eve_courier_optimizer.domain import (
     cargo_capacity_to_units,
     isk_to_units,
 )
-from eve_courier_optimizer.planning import prepare_problem
-from eve_courier_optimizer.sde import UniverseGraph
-from eve_courier_optimizer.snapshot import ContractSnapshot, read_snapshot
-from eve_courier_optimizer.solver import SolverConfig, solve_exact
-from eve_courier_optimizer.threat_intel import threat_avoided_systems
+from eve_courier_optimizer.eve.snapshot_file import read_snapshot
+from eve_courier_optimizer.optimization import RouteOptimizer, SolverConfig
+from eve_courier_optimizer.routing.route_problem import RouteProblem
+from eve_courier_optimizer.routing.security import threat_avoided_systems
+from eve_courier_optimizer.routing.universe import UniverseGraph
 
 FIXTURE = Path(__file__).with_name("empire_snapshot_2026-08-06.json")
 FROZEN_SDE = Path(__file__).with_name("empire_sde_3458726.sqlite3.gz")
@@ -156,22 +157,22 @@ def run_empire_profile(
 
     graph = load_empire_graph()
     snapshot = read_snapshot(FIXTURE)
-    prepared = prepare_problem(snapshot, graph, _constraints(graph, snapshot, profile))
-    eligible = prepared.problem.scope.eligible_contracts
+    problem = RouteProblem.from_snapshot(snapshot, graph, _constraints(graph, snapshot, profile))
+    eligible = problem.scope.eligible_contracts
     if eligible != profile.expected_eligible:
         raise RuntimeError(
             f"{profile.name} baseline changed: expected {profile.expected_eligible} eligible "
             f"contracts, got {eligible}"
         )
-    solved = solve_exact(
-        prepared,
+    solved = RouteOptimizer(
+        problem,
         graph,
         config=SolverConfig(
             max_time_seconds=time_limit_seconds,
             num_workers=workers,
             minimize_finish_time_after_proof=False,
         ),
-    )
+    ).solve()
     certificate = solved.certificate
     return EmpireBenchmarkResult(
         profile=profile.name,
