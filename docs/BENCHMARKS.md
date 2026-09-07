@@ -95,10 +95,14 @@ values; the immutable loop-aware problem fingerprints are
 `3fbb834f9cc9bd81cc314ff41558f789846f0273b35056afc76cf2be77da9fab` (BR) and
 `638062bb2505871841160776fe0b1b7e17a7edfb0b9a789d3aa98b6b0d774dd0` (DST).
 
-The source observation used SDE 3457062. Before normalizing the fixture to the current bundled SDE
+The source observation used SDE 3457062. Before normalizing the fixture to the benchmark SDE
 3458726, the benchmark preparation verified that all 8,490 systems, stargate adjacency, 5,210 NPC
 station mappings and 13,978 normal stargates were identical between the two route databases. The
 provenance and hashes are in `empire_baseline_manifest.json`.
+
+The benchmark now pins that SDE in `benchmarks/empire_sde_3458726.sqlite3.gz`, independently
+of the application’s bundled build. `load_empire_graph()` loads it for both Empire runners, so
+upgrading the application SDE preserves the frozen problem fingerprints and golden rewards.
 
 Run the realistic baseline explicitly. It is not part of routine pytest because the fallback budget
 still permits one-minute full-event searches on instances where decomposition cannot close:

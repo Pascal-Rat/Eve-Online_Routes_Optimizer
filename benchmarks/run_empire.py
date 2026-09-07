@@ -8,9 +8,11 @@ gets a one-minute CP-SAT search budget.
 from __future__ import annotations
 
 import argparse
+import gzip
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from eve_courier_optimizer.domain import (
     PlanningConstraints,
@@ -23,12 +25,24 @@ from eve_courier_optimizer.domain import (
     isk_to_units,
 )
 from eve_courier_optimizer.planning import prepare_problem
-from eve_courier_optimizer.sde import UniverseGraph, load_bundled_graph
+from eve_courier_optimizer.sde import UniverseGraph
 from eve_courier_optimizer.snapshot import ContractSnapshot, read_snapshot
 from eve_courier_optimizer.solver import SolverConfig, solve_exact
 from eve_courier_optimizer.threat_intel import threat_avoided_systems
 
 FIXTURE = Path(__file__).with_name("empire_snapshot_2026-08-06.json")
+FROZEN_SDE = Path(__file__).with_name("empire_sde_3458726.sqlite3.gz")
+
+
+def load_empire_graph() -> UniverseGraph:
+    """Pin routing data as well as contracts so bundled SDE upgrades preserve this benchmark."""
+    with TemporaryDirectory(prefix="eve-empire-sde-") as directory:
+        path = Path(directory) / "route_sde.sqlite3"
+        with gzip.open(FROZEN_SDE, "rb") as stream:
+            path.write_bytes(stream.read())
+        return UniverseGraph.from_sqlite(path)
+
+
 THREAT_CATEGORIES = frozenset(
     {
         ThreatCategory.SUICIDE_GANK,
@@ -140,7 +154,7 @@ def run_empire_profile(
 ) -> EmpireBenchmarkResult:
     """Solve one frozen Empire profile without truncating its eligible contract set."""
 
-    graph = load_bundled_graph()
+    graph = load_empire_graph()
     snapshot = read_snapshot(FIXTURE)
     prepared = prepare_problem(snapshot, graph, _constraints(graph, snapshot, profile))
     eligible = prepared.problem.scope.eligible_contracts
@@ -189,8 +203,10 @@ def main() -> int:
     if arguments.workers <= 0:
         parser.error("--workers must be positive")
 
-    profiles = PROFILES if arguments.profile == "all" else tuple(
-        profile for profile in PROFILES if profile.name == arguments.profile
+    profiles = (
+        PROFILES
+        if arguments.profile == "all"
+        else tuple(profile for profile in PROFILES if profile.name == arguments.profile)
     )
     print("profile status eligible selected reward_ISK bound_ISK gap wall_s branches")
     results: list[EmpireBenchmarkResult] = []

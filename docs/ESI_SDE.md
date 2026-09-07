@@ -55,7 +55,7 @@ regional API semantic, the 2026-08-06 cached observation contained 42,446 public
 locations resolved to SDE NPC stations; all 42,446 starts belonged to the region endpoint that
 returned them, including 353 cross-region deliveries in that sample.
 
-With bundled SDE build 3458726 the presets resolve to:
+With bundled SDE build 3494416 the presets resolve to:
 
 | Contract scope | Regions requested |
 | --- | ---: |
@@ -163,7 +163,7 @@ sequential and every individual request goes through the same cache/retry path.
 ## Bundled SDE subset
 
 The current archive contains `src/eve_courier_optimizer/data/route_sde.sqlite3`, generated from
-official CCP JSONL SDE build **3458726**, released **2026-08-06T11:07:36Z**.
+official CCP JSONL SDE build **3494416**, released **2026-09-04T11:09:51Z**.
 
 | Table | Rows |
 | --- | ---: |
@@ -173,7 +173,7 @@ official CCP JSONL SDE build **3458726**, released **2026-08-06T11:07:36Z**.
 | regions | 114 |
 | stargate positions | 13,978 |
 | item type groups | 1,610 |
-| item-to-group mappings | 52,848 |
+| item-to-group mappings | 52,999 |
 
 The raw SDE is intentionally not bundled. The route subset is sufficient for this model and keeps the
 archive small.

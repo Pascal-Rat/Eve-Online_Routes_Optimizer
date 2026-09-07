@@ -76,7 +76,7 @@ def test_jump_matrix_cache_returns_a_defensive_copy(tiny_graph: UniverseGraph) -
 
 def test_bundled_sde_is_current_and_contains_jita() -> None:
     graph = load_bundled_graph()
-    assert graph.metadata.build_number == 3_458_726
+    assert graph.metadata.build_number == 3_494_416
     assert graph.systems[30_000_142].name == "Jita"
     assert graph.station_system(60_003_760) == 30_000_142
     assert len(graph.systems) > 8_000

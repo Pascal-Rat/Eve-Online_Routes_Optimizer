@@ -34,13 +34,18 @@
       "cargo_m3": 13000,
       "collateral_isk": 5000000000,
       "eligible_contracts": 48,
-      "security_bands": ["high", "low"]
+      "security_bands": [
+        "high",
+        "low"
+      ]
     },
     "dst": {
       "cargo_m3": 62500,
       "collateral_isk": 10000000000,
       "eligible_contracts": 96,
-      "security_bands": ["high"]
+      "security_bands": [
+        "high"
+      ]
     }
   },
   "solver_observation": {
@@ -85,5 +90,11 @@
       "status": "proven_optimal",
       "wall_time_seconds": 7.769
     }
+  },
+  "routing_data": {
+    "file": "empire_sde_3458726.sqlite3.gz",
+    "sde_build": 3458726,
+    "sha256": "266583ac82d7058a094201682dc1f5d9b269cbd980661cc748d2c0fa14d5b2b2",
+    "note": "Frozen independently from the application SDE; preserves the original benchmark routing inputs."
   }
 }
