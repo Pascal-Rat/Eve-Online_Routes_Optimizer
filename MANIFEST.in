@@ -1,5 +1,6 @@
 include CONTRIBUTING.md SECURITY.md THIRD_PARTY_NOTICES.md
 include docs/BENCHMARKS.md docs/DOMAIN.md docs/INTERFACES.md docs/OPTIMIZATION.md
+include docs/HOW_THE_SOLVER_WORKS.md
 include docs/assets/ui-planner.png
 include benchmarks/*.py
 include benchmarks/frozen_universe.json benchmarks/empire_snapshot_2026-08-06.json
