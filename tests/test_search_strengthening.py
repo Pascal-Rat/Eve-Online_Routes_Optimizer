@@ -314,6 +314,7 @@ def test_feasible_master_selection_improves_master_without_false_proof(
         )
 
     monkeypatch.setattr(solver_module, "solve_system_relaxation_master", bounded_master)
+    monkeypatch.setattr(solver_module, "solve_batches", lambda *args, **kwargs: None)
     outcome = _run_dense_decomposition(
         prepared, tiny_graph, SolverConfig(minimize_finish_time_after_proof=False)
     )

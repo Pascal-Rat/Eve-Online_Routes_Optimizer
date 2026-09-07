@@ -114,12 +114,28 @@ shrinking removes a literal only after another exact `INFEASIBLE` proof. An `UNK
 creates a cut. If the bounded decomposition does not close, the complete exact model still runs with
 all valid bounds and cuts accumulated so far.
 
+Small master selections can instead be optimized by bounded dynamic programming. The state retains
+the current system and the picked/delivered contract sets; an earlier arrival dominates an identical
+state. This applies to locked collateral and to rolling collateral with nonbinding completion
+windows, without active shipments or required waypoints. Only a completed search supplies a reward
+ceiling `U(C)` for a subset `C`. Projection then justifies the weighted cut
+`sum(reward[i] * x[i] for i in C) <= U(C)`. Its enumerated feasible subsets also identify minimal
+infeasible cores. Time/state exhaustion supplies no new ceiling or core; any reconstructed route
+must still pass independent simulation. These cuts carry forward to the complete event model.
+
+A shared distinct pickup/delivery lane also admits an exact batch assignment model when collateral
+is locked, deadlines do not bind, and no active shipments or required waypoints are present.
+The horizon and actual approach/return/finish travel safely bound the number of batches. Cargo and
+parcel limits apply per batch, and collateral to the entire selection. Matching this model's
+rigorous reward ceiling to an independently verified route closes the same full-pool reward proof,
+without constructing event-pair decisions. Unsupported cases retain the general exact model.
+
 A strictly improved, independently verified route also feeds its reward lower bound and projected
 hint back into the master within the existing budget. Equality between a retained ceiling and an
 already verified route closes the proof without a duplicate exact-oracle solve.
 
 Plan schema 3 records the relaxation status, ceiling, wall time, distinct endpoint-system count,
-pair/clique counts, decomposition status/iterations, learned-core count, exact-subproblem time and
+pair/clique counts, decomposition status/iterations, learned-cut count, exact-subproblem time and
 whether the composite proof closed under `certificate.bound_strengthening`. A timed-out auxiliary
 `FEASIBLE` solve contributes its rigorous CP-SAT best objective bound as a ceiling. Its relaxation
 incumbent becomes a lower-bound witness only after the exact oracle routes it and the independent
