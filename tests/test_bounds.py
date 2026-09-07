@@ -4,6 +4,8 @@ import random
 from dataclasses import replace
 from datetime import datetime
 
+import pytest
+
 from eve_courier_optimizer.bounds import build_selection_cuts, solve_system_relaxation
 from eve_courier_optimizer.domain import (
     CollateralMode,
@@ -156,7 +158,10 @@ def test_pair_cut_accounts_for_capacity_when_shared_travel_needs_both_parcels(
 def test_dense_exact_solve_records_and_uses_bound_strengthening(
     now: datetime,
     tiny_graph: UniverseGraph,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Exercise the system-master certificate; compact batch certificates have separate coverage.
+    monkeypatch.setattr("eve_courier_optimizer.solver.solve_batches", lambda *args, **kwargs: None)
     contracts = tuple(
         make_contract(now, contract_id, 101, 103, volume=1, collateral=1, reward=100)
         for contract_id in range(1, 21)

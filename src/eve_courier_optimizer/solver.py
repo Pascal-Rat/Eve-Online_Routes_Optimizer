@@ -29,11 +29,14 @@ from typing import Final
 
 from ortools.sat.python import cp_model
 
+from .batch_search import solve_batches
 from .bounds import (
     SelectionCuts,
+    SubsetRewardCut,
     SystemRelaxationBound,
     add_proven_infeasible_selection_cut,
     add_resource_work_bounds,
+    add_subset_reward_cut,
     build_selection_cuts,
     build_system_relaxation_master,
     hint_system_relaxation_master,
@@ -52,6 +55,7 @@ from .planning import PreparedProblem
 from .proof import canonical_problem_sha256, optimality_claim
 from .reference_solver import solve_reference
 from .sde import UniverseGraph
+from .subset_search import solve_subset
 from .verification import (
     PlannedAction,
     PlannedVisit,
@@ -180,6 +184,7 @@ class _DecompositionOutcome:
     subproblem_wall_time_seconds: float
     subproblem_branches: int
     subproblem_conflicts: int
+    learned_reward_cuts: tuple[SubsetRewardCut, ...] = ()
 
 
 def _new_solver(
@@ -1314,8 +1319,6 @@ def _solve_reduced_exact_oracle(
     def solve_assuming_selected_contracts(
         assumed_selected_contract_ids: tuple[int, ...],
         time_limit_seconds: float,
-        *,
-        core_search: bool = False,
     ) -> tuple[cp_model.CpSolver, cp_model.CpSolverStatus]:
         route_model.model.clear_assumptions()
         route_model.model.add_assumptions(
@@ -1328,8 +1331,9 @@ def _solve_reduced_exact_oracle(
         if validation_error:
             raise ValueError(f"invalid reduced exact model: {validation_error}")
         solver = _new_time_limited_solver(config, time_limit_seconds)
-        if core_search:
-            solver.parameters.num_search_workers = 1
+        # Assumptions require single-worker search in OR-Tools 9.15. Use the core from this
+        # solve directly, leaving the remaining budget for deletion checks.
+        solver.parameters.num_search_workers = 1
         status = solver.solve(route_model.model)
         if status == cp_model.MODEL_INVALID:
             raise ValueError("CP-SAT rejected the validated reduced exact model")
@@ -1377,19 +1381,6 @@ def _solve_reduced_exact_oracle(
             conflicts=total_conflicts,
         )
 
-    # OR-Tools 9.15 only extracts useful assumption cores for satisfaction with one worker.
-    # Keep portfolio feasibility search, then spend remaining oracle budget on a real core.
-    remaining_time_seconds = solve_deadline - time.perf_counter()
-    if config.num_workers > 1 and remaining_time_seconds > 0.001:
-        core_solver, core_status = solve_assuming_selected_contracts(
-            selected_contract_ids, remaining_time_seconds, core_search=True
-        )
-        total_wall_time_seconds += core_solver.wall_time
-        total_branches += core_solver.num_branches
-        total_conflicts += core_solver.num_conflicts
-        if core_status == cp_model.INFEASIBLE:
-            selection_solver = core_solver
-
     assumption_core_indexes = selection_solver.sufficient_assumptions_for_infeasibility()
     unexpected_assumption_indexes = tuple(
         index for index in assumption_core_indexes if index not in contract_id_by_assumption_index
@@ -1417,7 +1408,7 @@ def _solve_reduced_exact_oracle(
             if candidate_contract_id != contract_id
         )
         shrink_solver, shrink_status = solve_assuming_selected_contracts(
-            trial_contract_ids, remaining_time_seconds, core_search=True
+            trial_contract_ids, remaining_time_seconds
         )
         total_wall_time_seconds += shrink_solver.wall_time
         total_branches += shrink_solver.num_branches
@@ -1579,6 +1570,7 @@ def _run_dense_decomposition(
 
     decomposition_deadline = time.perf_counter() + config.decomposition_time_seconds
     learned_infeasibility_cores: list[tuple[int, ...]] = []
+    learned_reward_cuts: list[SubsetRewardCut] = []
     latest_master_result: SystemRelaxationBound | None = None
     master_wall_time_seconds = 0.0
     master_branches = 0
@@ -1592,6 +1584,83 @@ def _run_dense_decomposition(
     verified_simulation = incumbent[1] if incumbent else None
     selected_contract_ids = incumbent[0] if incumbent else ()
     best_master_bound: int | None = None
+
+    batch_result = solve_batches(
+        prepared,
+        max_time_seconds=min(
+            config.decomposition_subproblem_time_seconds, config.decomposition_time_seconds
+        ),
+        random_seed=config.random_seed,
+    )
+    if batch_result is not None:
+        subproblem_wall_time_seconds += batch_result.wall_time_seconds
+        subproblem_branches += batch_result.cp_branches
+        subproblem_conflicts += batch_result.cp_conflicts
+        if batch_result.objective_units is not None:
+            simulation = simulate_and_verify(
+                prepared.problem, graph, batch_result.visits, batch_result.selected_contract_ids
+            )
+            if (
+                not simulation.report.valid
+                or simulation.total_reward_units != batch_result.objective_units
+            ):
+                raise RuntimeError("batch search failed independent full-problem verification")
+            if verified_simulation is None or (
+                simulation.total_reward_units,
+                -simulation.finish_seconds,
+            ) > (verified_simulation.total_reward_units, -verified_simulation.finish_seconds):
+                verified_simulation = simulation
+                selected_contract_ids = batch_result.selected_contract_ids
+        if batch_result.upper_bound_units is not None:
+            best_master_bound = batch_result.upper_bound_units
+            latest_master_result = SystemRelaxationBound(
+                "BATCH_OPTIMAL" if batch_result.complete else "BATCH_FEASIBLE",
+                best_master_bound,
+                batch_result.objective_units,
+                0.0,
+                0,
+                0,
+                master_model.routed_systems,
+                batch_result.selected_contract_ids,
+            )
+            if (
+                verified_simulation is not None
+                and best_master_bound < verified_simulation.total_reward_units
+            ):
+                raise RuntimeError("batch bound contradicts a verified incumbent")
+            if (
+                verified_simulation is not None
+                and best_master_bound == verified_simulation.total_reward_units
+            ):
+                return _DecompositionOutcome(
+                    relaxation=latest_master_result,
+                    selection_cuts=selection_cuts,
+                    simulation=verified_simulation,
+                    selected_contract_ids=selected_contract_ids,
+                    proven_infeasible=False,
+                    status_name="batch_bound_matched",
+                    iteration_count=0,
+                    learned_infeasibility_cores=(),
+                    subproblem_wall_time_seconds=subproblem_wall_time_seconds,
+                    subproblem_branches=subproblem_branches,
+                    subproblem_conflicts=subproblem_conflicts,
+                )
+            cut = SubsetRewardCut(
+                tuple(
+                    (i.contract.contract_id, i.contract.reward_units)
+                    for i in prepared.problem.contracts
+                ),
+                best_master_bound,
+            )
+            add_subset_reward_cut(master_model.model, master_model.contract_is_selected, cut)
+            learned_reward_cuts.append(cut)
+        if verified_simulation is not None:
+            hint_system_relaxation_master(
+                master_model,
+                selected_contract_ids,
+                tuple(leg.to_system_id for leg in verified_simulation.travel_legs),
+                verified_simulation.total_reward_units,
+            )
 
     for _ in range(config.decomposition_max_iterations):
         remaining_time_seconds = decomposition_deadline - time.perf_counter()
@@ -1632,15 +1701,91 @@ def _run_dense_decomposition(
         if remaining_time_seconds <= 0.001:
             status_name = "budget_exhausted"
             break
+        oracle_budget = min(config.decomposition_subproblem_time_seconds, remaining_time_seconds)
+        subset = _restrict_to_contract_selection(prepared, master_result.selected_contract_ids)
+        subset_result = solve_subset(subset, max_time_seconds=oracle_budget)
+        if subset_result is not None:
+            subproblem_wall_time_seconds += subset_result.wall_time_seconds
+            if subset_result.objective_units is not None:
+                simulation = simulate_and_verify(
+                    prepared.problem,
+                    graph,
+                    subset_result.visits,
+                    subset_result.selected_contract_ids,
+                )
+                if (
+                    not simulation.report.valid
+                    or simulation.total_reward_units != subset_result.objective_units
+                ):
+                    raise RuntimeError("subset search failed independent full-problem verification")
+                previous_reward = (
+                    verified_simulation.total_reward_units if verified_simulation else -1
+                )
+                if verified_simulation is None or (
+                    simulation.total_reward_units,
+                    -simulation.finish_seconds,
+                ) > (verified_simulation.total_reward_units, -verified_simulation.finish_seconds):
+                    verified_simulation = simulation
+                    selected_contract_ids = subset_result.selected_contract_ids
+                if best_master_bound == verified_simulation.total_reward_units:
+                    status_name = "bound_matched"
+                    break
+            if subset_result.complete:
+                if subset_result.upper_bound_units is None:
+                    proven_infeasible = True
+                    status_name = "exact_base_infeasible"
+                    break
+                if subset_result.upper_bound_units < sum(
+                    i.contract.reward_units for i in subset.problem.contracts
+                ):
+                    cut = SubsetRewardCut(
+                        tuple(
+                            (i.contract.contract_id, i.contract.reward_units)
+                            for i in subset.problem.contracts
+                        ),
+                        subset_result.upper_bound_units,
+                    )
+                    if cut in learned_reward_cuts:
+                        raise RuntimeError("decomposition produced a duplicate subset reward cut")
+                    add_subset_reward_cut(
+                        master_model.model, master_model.contract_is_selected, cut
+                    )
+                    learned_reward_cuts.append(cut)
+                    core = subset_result.infeasible_core_ids
+                    if core:
+                        if core in learned_infeasibility_cores:
+                            raise RuntimeError("decomposition produced a duplicate subset core")
+                        add_proven_infeasible_selection_cut(master_model, core)
+                        learned_infeasibility_cores.append(core)
+                    status_name = "subset_bound_learned"
+                else:
+                    status_name = "incumbent_found"
+                    if (
+                        verified_simulation is not None
+                        and verified_simulation.total_reward_units <= previous_reward
+                    ):
+                        break
+                if verified_simulation is not None:
+                    hint_system_relaxation_master(
+                        master_model,
+                        selected_contract_ids,
+                        tuple(leg.to_system_id for leg in verified_simulation.travel_legs),
+                        verified_simulation.total_reward_units,
+                    )
+                continue
+            oracle_budget = min(
+                oracle_budget - subset_result.wall_time_seconds,
+                decomposition_deadline - time.perf_counter(),
+            )
+            if oracle_budget <= 0.001:
+                status_name = "subset_unknown"
+                break
         exact_route_result = _solve_reduced_exact_oracle(
             prepared,
             graph,
             master_result.selected_contract_ids,
             config,
-            max_time_seconds=min(
-                config.decomposition_subproblem_time_seconds,
-                remaining_time_seconds,
-            ),
+            max_time_seconds=oracle_budget,
         )
         subproblem_wall_time_seconds += exact_route_result.wall_time_seconds
         subproblem_branches += exact_route_result.branches
@@ -1707,6 +1852,7 @@ def _run_dense_decomposition(
         subproblem_wall_time_seconds=subproblem_wall_time_seconds,
         subproblem_branches=subproblem_branches,
         subproblem_conflicts=subproblem_conflicts,
+        learned_reward_cuts=tuple(learned_reward_cuts),
     )
 
 
@@ -1825,7 +1971,10 @@ def solve_exact(
             incompatibility_cliques=len(selection_cuts.cliques),
             decomposition_status=decomposition.status_name,
             decomposition_iterations=decomposition.iteration_count,
-            decomposition_learned_cuts=len(decomposition.learned_infeasibility_cores),
+            decomposition_learned_cuts=(
+                len(decomposition.learned_infeasibility_cores)
+                + len(decomposition.learned_reward_cuts)
+            ),
             decomposition_subproblem_wall_time_seconds=(decomposition.subproblem_wall_time_seconds),
             decomposition_proof_closed=True,
         )
@@ -1866,7 +2015,10 @@ def solve_exact(
             incompatibility_cliques=len(selection_cuts.cliques),
             decomposition_status=decomposition.status_name,
             decomposition_iterations=decomposition.iteration_count,
-            decomposition_learned_cuts=len(decomposition.learned_infeasibility_cores),
+            decomposition_learned_cuts=(
+                len(decomposition.learned_infeasibility_cores)
+                + len(decomposition.learned_reward_cuts)
+            ),
             decomposition_subproblem_wall_time_seconds=(decomposition.subproblem_wall_time_seconds),
             decomposition_proof_closed=True,
         )
@@ -1883,6 +2035,8 @@ def solve_exact(
         selection_cuts,
         decomposition.learned_infeasibility_cores,
     )
+    for reward_cut in decomposition.learned_reward_cuts:
+        add_subset_reward_cut(route_model.model, route_model.contract_is_selected, reward_cut)
     if incumbent is not None:
         _hint_verified_route(route_model, prepared, _simulation_visits(incumbent[1]), incumbent[0])
     validation_error = route_model.model.validate()
@@ -1924,7 +2078,10 @@ def solve_exact(
             incompatibility_cliques=len(selection_cuts.cliques),
             decomposition_status=decomposition.status_name,
             decomposition_iterations=decomposition.iteration_count,
-            decomposition_learned_cuts=len(decomposition.learned_infeasibility_cores),
+            decomposition_learned_cuts=(
+                len(decomposition.learned_infeasibility_cores)
+                + len(decomposition.learned_reward_cuts)
+            ),
             decomposition_subproblem_wall_time_seconds=(decomposition.subproblem_wall_time_seconds),
             decomposition_proof_closed=False,
         )
@@ -1957,7 +2114,10 @@ def solve_exact(
             incompatibility_cliques=len(selection_cuts.cliques),
             decomposition_status=decomposition.status_name,
             decomposition_iterations=decomposition.iteration_count,
-            decomposition_learned_cuts=len(decomposition.learned_infeasibility_cores),
+            decomposition_learned_cuts=(
+                len(decomposition.learned_infeasibility_cores)
+                + len(decomposition.learned_reward_cuts)
+            ),
             decomposition_subproblem_wall_time_seconds=(decomposition.subproblem_wall_time_seconds),
             decomposition_proof_closed=False,
         )
@@ -2084,7 +2244,9 @@ def solve_exact(
         incompatibility_cliques=len(selection_cuts.cliques),
         decomposition_status=decomposition.status_name,
         decomposition_iterations=decomposition.iteration_count,
-        decomposition_learned_cuts=len(decomposition.learned_infeasibility_cores),
+        decomposition_learned_cuts=(
+            len(decomposition.learned_infeasibility_cores) + len(decomposition.learned_reward_cuts)
+        ),
         decomposition_subproblem_wall_time_seconds=(decomposition.subproblem_wall_time_seconds),
         decomposition_proof_closed=False,
     )

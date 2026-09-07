@@ -260,9 +260,12 @@ inside a 20-second total decomposition envelope. These are search budgets only. 
 contract or weaken proof scope.
 
 For OR-Tools 9.15, useful core extraction requires a satisfaction problem with one worker. The
-oracle clears the objective and, after portfolio infeasibility, uses remaining budget for
-single-worker core extraction and deletion checks. See the
-[versioned upstream implementation](https://github.com/google/or-tools/blob/v9.15/ortools/sat/cp_model_solver.cc#L2509).
+assumption oracle explicitly uses one worker and clears the objective. It uses that solve's core
+directly, then spends remaining budget on deletion checks. Small supported selections can use
+bounded dynamic programming first; completed searches yield both weighted subset ceilings and
+minimal conflicting sets. Shared-lane inputs can close through compact exact batching. See
+[OPTIMALITY.md](OPTIMALITY.md#composite-masterexact-proof) for their proof conditions and the
+[upstream assumption limitations](https://github.com/google/or-tools/blob/v9.15/ortools/sat/docs/troubleshooting.md).
 
 On the unchanged 96-eligible frozen Empire DST profile, the first master optimum is five contracts
 worth 58.000000 M ISK. The reduced exact model routes those five and the independent verifier accepts

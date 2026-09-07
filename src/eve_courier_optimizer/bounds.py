@@ -54,6 +54,23 @@ class SelectionCuts:
     cliques: tuple[tuple[int, ...], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SubsetRewardCut:
+    """A certified optional-reward ceiling on a subset of the original candidate pool."""
+
+    terms: tuple[tuple[int, int], ...]
+    upper_bound_units: int
+
+
+def add_subset_reward_cut(
+    model: cp_model.CpModel,
+    selected: dict[int, cp_model.IntVar],
+    cut: SubsetRewardCut,
+) -> None:
+    """Projection onto this subset preserves feasibility; its exact ceiling applies globally."""
+    model.add(sum(reward * selected[cid] for cid, reward in cut.terms) <= cut.upper_bound_units)
+
+
 def _integer_upper_bound(raw_bound: float) -> int:
     """Conservatively convert CP-SAT's double objective bound to an integer ceiling."""
 

@@ -215,10 +215,18 @@ def test_cargo_capacity_forces_delivery_before_next_pickup(
     ]
 
 
+@pytest.mark.parametrize("use_subset_search", [False, True])
 def test_decomposition_learns_higher_order_cargo_infeasibility(
     now: datetime,
     tiny_graph: UniverseGraph,
+    monkeypatch: pytest.MonkeyPatch,
+    use_subset_search: bool,
 ) -> None:
+    monkeypatch.setattr("eve_courier_optimizer.solver.solve_batches", lambda *args, **kwargs: None)
+    if not use_subset_search:
+        monkeypatch.setattr(
+            "eve_courier_optimizer.solver.solve_subset", lambda *args, **kwargs: None
+        )
     contracts = tuple(
         make_contract(
             now,
@@ -251,13 +259,20 @@ def test_decomposition_learns_higher_order_cargo_infeasibility(
         ),
     )
 
-    assert outcome.simulation is None
+    if use_subset_search:
+        assert outcome.simulation is not None and outcome.simulation.report.valid
+        assert len(outcome.learned_reward_cuts) == 1
+        assert outcome.learned_reward_cuts[0].upper_bound_units == 2039
+        assert len(outcome.learned_infeasibility_cores) == 1
+        assert len(outcome.learned_infeasibility_cores[0]) == 3
+    else:
+        assert outcome.simulation is None
+        assert len(outcome.learned_infeasibility_cores) == 1
+        assert len(outcome.learned_infeasibility_cores[0]) == 3
     assert not outcome.proven_infeasible
     assert outcome.status_name == "iteration_limit"
     assert outcome.iteration_count == 1
     assert outcome.selection_cuts.pairs == ()
-    assert len(outcome.learned_infeasibility_cores) == 1
-    assert len(outcome.learned_infeasibility_cores[0]) == 3
 
 
 def test_active_picked_shipment_can_make_model_infeasible(

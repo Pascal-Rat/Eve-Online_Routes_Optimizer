@@ -57,6 +57,8 @@ mutation of the old optimization problem.
 | `planning.py` | policy exclusions, proof-preserving reductions, profitability ranking |
 | `bounds.py` | resource-aware pair incompatibilities, clique cuts, reusable endpoint-system master and learned no-good encoding |
 | `solver.py` | logic-based master/exact decomposition plus the full prize-collecting pickup/delivery CP-SAT fallback |
+| `subset_search.py` | bounded subset dynamic programming, verified route witnesses and exact subset reward/core certificates |
+| `batch_search.py` | compact exact assignment model for a shared haul lane with nonbinding deadlines |
 | `reference_solver.py` | independent exhaustive oracle for small locked-mode instances |
 | `verification.py` | post-solve simulation that does not trust CP-SAT state variables |
 | `proof.py` | canonical problem fingerprint and scope-aware claim text |
