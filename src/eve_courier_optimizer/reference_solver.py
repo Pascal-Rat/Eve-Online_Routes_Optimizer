@@ -38,12 +38,10 @@ def solve_reference(prepared: PreparedProblem, *, contract_limit: int = 12) -> R
         raise ValueError(f"reference solver limit is {contract_limit} contracts")
 
     contract_count = len(contracts)
-    cargo_volume_by_index = [contract.contract.volume_units for contract in contracts]
-    collateral_by_index = [contract.contract.collateral_units for contract in contracts]
-    reward_by_index = [contract.contract.reward_units for contract in contracts]
-    deadline_seconds_by_index = [
-        contract.contract.days_to_complete * 86_400 for contract in contracts
-    ]
+    cargo_volume_by_index = [contract.volume_units for contract in contracts]
+    collateral_by_index = [contract.collateral_units for contract in contracts]
+    reward_by_index = [contract.reward_units for contract in contracts]
+    deadline_seconds_by_index = [contract.days_to_complete * 86_400 for contract in contracts]
     all_contracts_mask = (1 << contract_count) - 1
 
     def sum_selected_values(values: list[int], selection_mask: int) -> int:

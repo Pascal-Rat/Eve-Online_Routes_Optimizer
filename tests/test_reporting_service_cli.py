@@ -10,12 +10,13 @@ import pytest
 import eve_courier_optimizer.cli as cli_module
 from eve_courier_optimizer.cli import main
 from eve_courier_optimizer.domain import PlanningConstraints, SecurityPolicy, TravelTimeModel
-from eve_courier_optimizer.esi import EsiClient, HttpResponse
+from eve_courier_optimizer.esi import EsiClient
+from eve_courier_optimizer.http import HttpResponse
 from eve_courier_optimizer.reporting import solve_result_to_dict, write_solve_result
 from eve_courier_optimizer.sde import UniverseGraph
+from eve_courier_optimizer.search_config import SolverConfig
 from eve_courier_optimizer.service import PlannerService
 from eve_courier_optimizer.snapshot import ContractSnapshot, write_snapshot
-from eve_courier_optimizer.solver import SolverConfig
 
 from .conftest import make_contract, make_snapshot
 
@@ -43,11 +44,12 @@ def test_service_and_reporting(
         security=SecurityPolicy(0.45),
     )
     service = PlannerService(graph, EsiClient(transport=EmptyTransport()))
-    prepared, result = service.solve(
+    plan = service.solve(
         snapshot,
         constraints,
         solver_config=SolverConfig(max_time_seconds=10),
     )
+    prepared, result = plan.prepared, plan.result
     payload = solve_result_to_dict(result, prepared.problem)
     assert payload["schema_version"] == 3
     assert payload["certificate"]["status"] == "proven_optimal"

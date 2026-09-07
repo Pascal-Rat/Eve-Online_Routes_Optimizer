@@ -1,84 +1,71 @@
-# Contributing
+# Development
 
-Changes are welcome when they preserve the project's narrow proof claims and reproducible inputs.
-
-## Development setup
+Install Python 3.12+ and an editable development environment:
 
 ```bash
 python3.12 -m venv .venv
-.venv/bin/python -m pip install -e ".[dev]"
-```
-
-Run every release gate before submitting a change:
-
-```bash
-.venv/bin/ruff check src tools tests benchmarks
-.venv/bin/mypy src tools tests benchmarks
-.venv/bin/pytest
-PYTHONPATH=src .venv/bin/python -m benchmarks.run_frozen --time-limit 10
-```
-
-The test command enforces branch-aware coverage of at least 85%, including spawned workers.
-Also run the real frozen Empire reward/proof regression:
-
-```bash
-PYTHONPATH=src .venv/bin/python -m benchmarks.run_empire --time-limit 60
-```
-
-For UI changes, install the optional browser test dependencies and run the Chromium workflows:
-
-```bash
 .venv/bin/python -m pip install -e ".[dev,browser]"
 .venv/bin/python -m playwright install chromium
-.venv/bin/ruff check browser_tests
-.venv/bin/mypy browser_tests
-.venv/bin/pytest browser_tests --no-cov --browser chromium --tracing retain-on-failure
 ```
 
-Browser tests use local synthetic ESI responses. CI runs them separately and retains failure traces.
-They cover scan/rank/solve/arming, reloads, real progress after infeasible replans, horizon recovery,
-zero-denominator scores, and job cancellation.
+## Find the code
 
-## Proof-sensitive changes
+All Python application modules are in `src/eve_courier_optimizer`.
 
-Any change to preprocessing, arc generation, constraints, objectives, bound conversion, or route
-extraction needs tests that would fail if a feasible route were incorrectly removed or an infeasible
-route accepted.
+| Responsibility | Entry points |
+| --- | --- |
+| Contracts, constraints, route events and certificates | `domain.py` |
+| SDE graph, permitted shortest paths and database build | `sde.py`, `sde_build.py` |
+| Public observations | `scanner.py`, `esi.py`, `threat_intel.py`; shared transport/cache in `http.py` |
+| Observed route policy and preparation | `route_policy.py`, `planning.py` |
+| Search orchestration and budgets | `solver.py`, `search_config.py` |
+| Complete mathematical model | `event_model.py` |
+| Master, exact selection checks and strengthening | `decomposition.py`, `bounds.py`, `subset_search.py`, `batch_search.py` |
+| Verified constructive incumbents | `construction.py` |
+| Independent replay and exhaustive reference | `verification.py`, `reference_solver.py` |
+| Accepted commitments and transitions | `execution.py` |
+| Shared scan/solve/replan/arm workflow | `service.py` |
+| Durable local session and cancellable jobs | `session.py`, `jobs.py` |
+| CLI and HTTP boundaries | `cli.py`, `webapp.py`, `web_options.py` |
+| Serialization and display | `snapshot.py`, `reporting.py`, `presentation.py`, `jsonio.py` |
+| Browser controller, form, route display and autocomplete | `web/app.js`, `planner_form.js`, `route_view.js`, `autocomplete.js` |
 
-- Safe preprocessing must include a mathematical reason it cannot lower the optimum.
-- Heuristic deletion must be opt-in and set `scope_untruncated=false`.
-- A solution hint must not constrain the feasible set.
-- New solver state must enter independent verification when it affects route feasibility.
-- New mathematical inputs must enter `problem_sha256` and the plan artifact.
-- Status text must distinguish a feasible incumbent from a closed optimality bound.
+The main flow is observation → policy/constraints → prepared problem → search → independent replay
+→ plan. `RoutePlan` keeps a prepared input together with its result. Arming turns a revalidated plan
+into execution state; replanning combines a fresh observation with those persistent obligations.
+Search never calls external APIs. Graph topology is immutable to callers; query caches are bounded
+and discarded when a graph crosses the spawned-worker boundary.
 
-For small locked-mode cases, compare CP-SAT to `reference_solver.py`. Add or extend a frozen
-benchmark for performance work that targets a specific operating profile.
+## Validate
 
-## Data/API changes
+```bash
+.venv/bin/ruff check src tools tests benchmarks browser_tests
+.venv/bin/ruff format --check src tools tests benchmarks browser_tests
+.venv/bin/mypy src tools tests benchmarks browser_tests
+.venv/bin/pytest
+.venv/bin/pytest browser_tests --no-cov --browser chromium --tracing retain-on-failure
+.venv/bin/python -m benchmarks.run_frozen --time-limit 10
+.venv/bin/python -m benchmarks.run_empire --time-limit 60 --workers 4
+.venv/bin/python -m pip wheel . --no-deps -w dist
+```
 
-- Never query live ESI or zKillboard from inside the optimizer.
-- Persist observations first, including timestamps, scope, failure/incompleteness metadata, and source
-  identity.
-- Keep request behavior sequential, cache-aware, and within the provider's published rules.
-- Do not commit OAuth secrets, tokens, personal route artifacts, or runtime cache databases.
-- When the SDE schema changes, keep the builder atomic and retain an integrity check.
+Tests enforce at least 85% branch-inclusive coverage, including spawned workers. Browser tests use
+synthetic local responses and exercise scanning, ranking, solving, arming, persistence, infeasible
+recovery, cancellation and asynchronous autocomplete. No frontend compiler or runtime dependency
+is needed beyond the browser. Live-network tests must remain opt-in.
 
-Live-network tests must be explicitly marked and optional. Default CI uses frozen fixtures.
+For solver or preprocessing changes, follow [benchmark methodology](docs/BENCHMARKS.md). Protect
+small hand-checkable optima and feasibility boundaries as well as representative workloads.
+Keep generated benchmark results, diagnostic dumps and validation logs out of commits.
+A safe reduction needs a mathematical reason it cannot remove an optimum. Heuristic caps must
+remain explicit and mark proof scope. An infeasible core needs an actual infeasibility proof; a
+relaxation incumbent must never be reported as a reward ceiling.
 
-## Code style
+Keep independent verification independent: do not share solver state propagation or production
+search with the reference implementation. New mathematical inputs belong in the problem fingerprint
+and persisted model. Preserve accepted-state compatibility when modifying artifact schemas.
 
-Python is 3.12+, Ruff-clean, and checked with strict Mypy. Domain records are immutable where
-practical. Keep transport, persistence, mathematical, verification, and presentation concerns in
-their existing modules rather than adding solver logic to CLI or JavaScript code.
-
-## Documentation and license
-
-Update the mathematical model, proof scope, JSON formats and relevant operator guide when behavior
-changes. `CHANGELOG.md` stays release-level rather than becoming a commit diary; add an entry only
-when the change belongs in operator-facing release notes. Use `$$` blocks for display math so
-formulas render in GitHub and common Markdown viewers, and explain important equations in plain
-language immediately nearby.
-
-Contributions are distributed under the [MIT License](LICENSE). Third-party EVE/CCP material remains
-subject to the notices and terms described in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[Domain rules](docs/DOMAIN.md), [optimization](docs/OPTIMIZATION.md), and
+[interfaces](docs/INTERFACES.md) document the non-obvious contracts. Keep explanations there concise;
+source code should reveal ordinary control flow. See [SECURITY.md](SECURITY.md) and
+[third-party notices](THIRD_PARTY_NOTICES.md) before publishing data or changing integrations.

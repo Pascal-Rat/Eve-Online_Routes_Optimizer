@@ -71,29 +71,27 @@ def add_subset_reward_cut(
     model.add(sum(reward * selected[cid] for cid, reward in cut.terms) <= cut.upper_bound_units)
 
 
-def _integer_upper_bound(raw_bound: float) -> int:
+def add_selection_cuts(
+    model: cp_model.CpModel,
+    selected: dict[int, cp_model.IntVar],
+    cuts: SelectionCuts,
+) -> None:
+    covered_pairs = {
+        tuple(sorted(pair)) for clique in cuts.cliques for pair in combinations(clique, 2)
+    }
+    for clique in cuts.cliques:
+        model.add(sum(selected[contract_id] for contract_id in clique) <= 1)
+    for first, second in cuts.pairs:
+        if (first, second) not in covered_pairs:
+            model.add(selected[first] + selected[second] <= 1)
+
+
+def integer_upper_bound(raw_bound: float) -> int:
     """Conservatively convert CP-SAT's double objective bound to an integer ceiling."""
 
     if abs(raw_bound) <= 2**53 - 1:
         return int(math.ceil(raw_bound))
     return int(math.ceil(math.nextafter(raw_bound, math.inf)))
-
-
-def _active_reward(prepared: PreparedProblem) -> int:
-    return sum(
-        shipment.contract.contract.reward_units for shipment in prepared.problem.active_shipments
-    )
-
-
-def _active_collateral(prepared: PreparedProblem) -> int:
-    return sum(
-        shipment.contract.contract.collateral_units
-        for shipment in prepared.problem.active_shipments
-    )
-
-
-def _mandatory_action_count(prepared: PreparedProblem) -> int:
-    return sum(1 if shipment.picked else 2 for shipment in prepared.problem.active_shipments)
 
 
 def _collect_relaxation_system_ids(
@@ -190,7 +188,7 @@ def add_resource_work_bounds(
     c = problem.constraints
     service = c.travel.service_seconds
     jump_seconds = c.travel.seconds_per_jump
-    mandatory_service = _mandatory_action_count(prepared) * service
+    mandatory_service = prepared.problem.mandatory_action_count * service
     symmetric_metric = all(
         distance == prepared.jump_matrix.get((destination, source))
         for (source, destination), distance in prepared.jump_matrix.items()
@@ -214,16 +212,16 @@ def add_resource_work_bounds(
         shipments: list[tuple[int | None, int, int, int]] = []
         for item in problem.contracts:
             demand = (
-                item.contract.volume_units
+                item.volume_units
                 if resource == "volume"
-                else item.contract.collateral_units
+                else item.collateral_units
                 if resource == "collateral"
                 else 1
             )
             demand = spec.demand(demand)
             shipments.append(
                 (
-                    item.contract.contract_id,
+                    item.contract_id,
                     demand,
                     item.origin_system_id,
                     item.destination_system_id,
@@ -232,9 +230,9 @@ def add_resource_work_bounds(
         for active in problem.active_shipments:
             item = active.contract
             demand = (
-                item.contract.volume_units
+                item.volume_units
                 if resource == "volume"
-                else item.contract.collateral_units
+                else item.collateral_units
                 if resource == "collateral"
                 else 1
             )
@@ -340,35 +338,13 @@ def build_system_relaxation_master(
 
     model = cp_model.CpModel()
     contract_is_selected = {
-        contract.contract.contract_id: model.new_bool_var(
-            f"relax_select_{contract.contract.contract_id}"
-        )
+        contract.contract_id: model.new_bool_var(f"relax_select_{contract.contract_id}")
         for contract in problem.contracts
     }
     effective_selection_cuts = (
         selection_cuts if selection_cuts is not None else build_selection_cuts(prepared)
     )
-    contract_pairs_already_covered_by_cliques = {
-        tuple(sorted(pair))
-        for clique in effective_selection_cuts.cliques
-        for pair in combinations(clique, 2)
-    }
-    for mutually_exclusive_contract_ids in effective_selection_cuts.cliques:
-        model.add(
-            sum(
-                contract_is_selected[contract_id] for contract_id in mutually_exclusive_contract_ids
-            )
-            <= 1
-        )
-    for first_contract_id, second_contract_id in effective_selection_cuts.pairs:
-        if (
-            first_contract_id,
-            second_contract_id,
-        ) not in contract_pairs_already_covered_by_cliques:
-            model.add(
-                contract_is_selected[first_contract_id] + contract_is_selected[second_contract_id]
-                <= 1
-            )
+    add_selection_cuts(model, contract_is_selected, effective_selection_cuts)
     system_is_visited = {
         system_id: model.new_bool_var(f"relax_visit_{system_id}")
         for system_id in intermediate_system_ids
@@ -378,7 +354,7 @@ def build_system_relaxation_master(
         system_id: [] for system_id in intermediate_system_ids
     }
     for contract in problem.contracts:
-        is_contract_selected = contract_is_selected[contract.contract.contract_id]
+        is_contract_selected = contract_is_selected[contract.contract_id]
         for system_id in {
             contract.origin_system_id,
             contract.destination_system_id,
@@ -437,24 +413,23 @@ def build_system_relaxation_master(
 
     selected_contract_count = sum(contract_is_selected.values())
     service_time_seconds = constraints.travel.service_seconds * (
-        _mandatory_action_count(prepared) + 2 * selected_contract_count
+        prepared.problem.mandatory_action_count + 2 * selected_contract_count
     )
     model.add(sum(travel_time_terms) + service_time_seconds <= constraints.horizon_seconds)
 
     if constraints.collateral_mode is CollateralMode.LOCKED:
         model.add(
-            _active_collateral(prepared)
+            prepared.problem.initial_collateral_units
             + sum(
-                contract.contract.collateral_units
-                * contract_is_selected[contract.contract.contract_id]
+                contract.collateral_units * contract_is_selected[contract.contract_id]
                 for contract in problem.contracts
             )
             <= constraints.collateral_budget_units
         )
 
-    committed_reward_units = _active_reward(prepared)
+    committed_reward_units = prepared.problem.committed_reward_units
     maximum_reward_units = committed_reward_units + sum(
-        contract.contract.reward_units for contract in problem.contracts
+        contract.reward_units for contract in problem.contracts
     )
     total_reward_units = model.new_int_var(
         committed_reward_units,
@@ -465,7 +440,7 @@ def build_system_relaxation_master(
         total_reward_units
         == committed_reward_units
         + sum(
-            contract.contract.reward_units * contract_is_selected[contract.contract.contract_id]
+            contract.reward_units * contract_is_selected[contract.contract_id]
             for contract in problem.contracts
         )
     )
@@ -578,7 +553,7 @@ def solve_system_relaxation_master(
             if status == cp_model.OPTIMAL
             else max(
                 objective_units,
-                _integer_upper_bound(solver.best_objective_bound),
+                integer_upper_bound(solver.best_objective_bound),
             )
         )
         selected_contract_ids = tuple(
@@ -657,16 +632,16 @@ def _pair_minimum_seconds(
             contract = contracts[event_index // 2]
             is_pickup = event_index % 2 == 0
             if is_pickup:
-                cargo_load_units += contract.contract.volume_units
+                cargo_load_units += contract.volume_units
                 active_contract_count += 1
                 if constraints.collateral_mode is CollateralMode.ROLLING:
-                    locked_collateral_units += contract.contract.collateral_units
+                    locked_collateral_units += contract.collateral_units
                 target_system_id = contract.origin_system_id
             else:
-                cargo_load_units -= contract.contract.volume_units
+                cargo_load_units -= contract.volume_units
                 active_contract_count -= 1
                 if constraints.collateral_mode is CollateralMode.ROLLING:
-                    locked_collateral_units -= contract.contract.collateral_units
+                    locked_collateral_units -= contract.collateral_units
                 target_system_id = contract.destination_system_id
             if cargo_load_units > constraints.cargo_capacity_units:
                 is_feasible = False
@@ -690,13 +665,12 @@ def _pair_minimum_seconds(
                 pickup_times[event_index // 2] = arrival
                 if (
                     constraints.collateral_mode is CollateralMode.ROLLING
-                    and arrival
-                    >= (contract.contract.date_expired - constraints.snapshot_time).total_seconds()
+                    and arrival > contract.last_pickup_second(constraints.snapshot_time)
                 ):
                     is_feasible = False
                     break
             else:
-                deadline = contract.contract.days_to_complete * 86_400
+                deadline = contract.days_to_complete * 86_400
                 if constraints.collateral_mode is CollateralMode.ROLLING:
                     deadline += pickup_times[event_index // 2]
                 if elapsed > deadline:
@@ -754,17 +728,17 @@ def build_selection_cuts(prepared: PreparedProblem) -> SelectionCuts:
 
     problem = prepared.problem
     constraints = problem.constraints
-    contract_ids = tuple(contract.contract.contract_id for contract in problem.contracts)
-    contract_by_id = {contract.contract.contract_id: contract for contract in problem.contracts}
-    active_collateral_units = _active_collateral(prepared)
+    contract_ids = tuple(contract.contract_id for contract in problem.contracts)
+    contract_by_id = {contract.contract_id: contract for contract in problem.contracts}
+    active_collateral_units = prepared.problem.initial_collateral_units
     incompatible_contract_pairs: list[tuple[int, int]] = []
     for first_id, second_id in combinations(contract_ids, 2):
         collateral_conflict = False
         if constraints.collateral_mode is CollateralMode.LOCKED:
             collateral_conflict = (
                 active_collateral_units
-                + contract_by_id[first_id].contract.collateral_units
-                + contract_by_id[second_id].contract.collateral_units
+                + contract_by_id[first_id].collateral_units
+                + contract_by_id[second_id].collateral_units
                 > constraints.collateral_budget_units
             )
         minimum_seconds = _pair_minimum_seconds(

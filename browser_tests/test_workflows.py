@@ -108,3 +108,62 @@ def test_reload_running_job_and_cancel(page: Page, web_session: WebSession) -> N
     expect(page.locator("#scan-button")).to_be_enabled()
     assert web_session.app.snapshot is None
     assert not web_session.app.snapshot_path.exists()
+
+
+def test_autocomplete_ignores_outdated_and_dismissed_results(
+    page: Page, web_session: WebSession
+) -> None:
+    from playwright.sync_api import Route
+
+    requests: dict[str, Route] = {}
+
+    def intercept(route: Route) -> None:
+        query = route.request.url.rsplit("=", 1)[1]
+        requests[query] = route
+        if query == "Be":
+            route.fulfill(
+                json={
+                    "items": [
+                        {"id": 2, "name": "Beta", "security_status": 0.9},
+                        {"id": 3, "name": "Beta Minor", "security_status": 0.8},
+                    ]
+                }
+            )
+
+    page.route("**/api/systems?q=*", intercept)
+    page.goto(web_session.url)
+    start = page.locator("#start")
+    menu = page.locator("#start-options")
+    with page.expect_request("**/api/systems?q=Al"):
+        start.fill("Al")
+    with page.expect_request("**/api/systems?q=Be"):
+        start.fill("Be")
+    expect(menu.get_by_role("option")).to_have_text(["Betasec 0.90", "Beta Minorsec 0.80"])
+    requests["Al"].fulfill(json={"items": [{"id": 1, "name": "Alpha", "security_status": 1.0}]})
+    page.evaluate("() => new Promise(requestAnimationFrame)")
+    expect(menu.get_by_role("option")).to_have_text(["Betasec 0.90", "Beta Minorsec 0.80"])
+    start.press("ArrowUp")
+    expect(start).to_have_attribute("aria-activedescendant", "start-options-option-1")
+    start.press("ArrowDown")
+    expect(start).to_have_attribute("aria-activedescendant", "start-options-option-0")
+    start.press("Enter")
+    expect(start).to_have_value("Beta")
+    expect(start).to_have_attribute("data-system-id", "2")
+
+    with page.expect_request("**/api/systems?q=Ga"):
+        start.fill("Ga")
+    start.press("Escape")
+    requests["Ga"].fulfill(json={"items": [{"id": 3, "name": "Gamma"}]})
+    page.evaluate("() => new Promise(requestAnimationFrame)")
+    expect(menu).to_be_hidden()
+
+
+def test_mobile_route_scroll_stays_inside_its_table(page: Page, web_session: WebSession) -> None:
+    web_session.app.scan({"regions": [10]})
+    web_session.app.solve(planning_payload())
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.goto(web_session.url)
+    expect(page.locator("#route-wrap")).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    table = page.locator("#route-wrap")
+    assert table.evaluate("element => element.scrollWidth > element.clientWidth")

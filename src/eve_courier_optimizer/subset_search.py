@@ -11,9 +11,8 @@ import math
 import time
 from dataclasses import dataclass
 
-from .domain import ActionKind, CollateralMode
+from .domain import ActionKind, CollateralMode, PlannedAction
 from .planning import PreparedProblem
-from .verification import PlannedAction
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,9 +61,7 @@ def solve_subset(
         count > contract_limit
         or problem.active_shipments
         or c.required_system_ids
-        or (
-            rolling and any(i.contract.days_to_complete * 86_400 < c.horizon_seconds for i in items)
-        )
+        or (rolling and any(i.days_to_complete * 86_400 < c.horizon_seconds for i in items))
     ):
         return None
 
@@ -90,15 +87,11 @@ def solve_subset(
     )
     pickups = tuple(system_index[i.origin_system_id] for i in items)
     deliveries = tuple(system_index[i.destination_system_id] for i in items)
-    volume = tuple(i.contract.volume_units for i in items)
-    collateral = tuple(i.contract.collateral_units for i in items)
-    rewards = tuple(i.contract.reward_units for i in items)
-    deadlines = tuple(i.contract.days_to_complete * 86_400 for i in items)
-    pickup_limits = []
-    for item in items:
-        delta = item.contract.date_expired - c.snapshot_time
-        microseconds = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
-        pickup_limits.append((microseconds - 1) // 1_000_000)
+    volume = tuple(i.volume_units for i in items)
+    collateral = tuple(i.collateral_units for i in items)
+    rewards = tuple(i.reward_units for i in items)
+    deadlines = tuple(i.days_to_complete * 86_400 for i in items)
+    pickup_limits = tuple(contract.last_pickup_second(c.snapshot_time) for contract in items)
 
     all_mask = (1 << count) - 1
     volume_sum = [0] * (all_mask + 1)
@@ -123,7 +116,7 @@ def solve_subset(
             actions.append(
                 PlannedAction(
                     ActionKind.PICKUP if action < count else ActionKind.DELIVERY,
-                    items[index].contract.contract_id,
+                    items[index].contract_id,
                 )
             )
             label = parent
@@ -141,11 +134,11 @@ def solve_subset(
             best_reward,
             best_reward if complete else None,
             tuple(reversed(actions)),
-            tuple(sorted(items[i].contract.contract_id for i in range(count) if chosen & (1 << i))),
+            tuple(sorted(items[i].contract_id for i in range(count) if chosen & (1 << i))),
             complete,
             explored,
             time.perf_counter() - started,
-            tuple(sorted(items[i].contract.contract_id for i in range(count) if core & (1 << i))),
+            tuple(sorted(items[i].contract_id for i in range(count) if core & (1 << i))),
         )
 
     for mask in range(1, all_mask + 1):

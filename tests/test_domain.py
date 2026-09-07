@@ -214,9 +214,9 @@ def test_contract_rejects_invalid_invariants(overrides: dict[str, object]) -> No
 def test_routable_and_active_shipments_reject_invalid_coordinates() -> None:
     contract = _contract()
     with pytest.raises(ValueError, match="system IDs"):
-        RoutableContract(contract, 0, 2)
+        RoutableContract.resolve(contract, 0, 2)
 
-    routable = RoutableContract(contract, 1, 2)
+    routable = RoutableContract.resolve(contract, 1, 2)
     with pytest.raises(ValueError, match="timezone"):
         ActiveShipment(routable, datetime(2026, 8, 6))
 
@@ -225,9 +225,7 @@ def test_routable_and_active_shipments_reject_invalid_coordinates() -> None:
     ("jump_seconds", "service_seconds"),
     [(0, 0), (60, -1)],
 )
-def test_travel_time_model_rejects_invalid_values(
-    jump_seconds: int, service_seconds: int
-) -> None:
+def test_travel_time_model_rejects_invalid_values(jump_seconds: int, service_seconds: int) -> None:
     with pytest.raises(ValueError):
         TravelTimeModel(jump_seconds, service_seconds)
 
@@ -296,3 +294,10 @@ def test_route_shape_constraints_validate_and_default_to_loop() -> None:
             snapshot_time=datetime(2026, 8, 5, tzinfo=UTC),
             max_simultaneous_contracts=-1,
         )
+
+
+@pytest.mark.parametrize("value", ["", "one", "1.2.3"])
+def test_invalid_decimal_input_is_a_validation_error(value: str) -> None:
+    for convert in (cargo_volume_to_units, cargo_capacity_to_units, isk_to_units):
+        with pytest.raises(ValueError, match="decimal number"):
+            convert(value)

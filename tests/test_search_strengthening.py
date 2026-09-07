@@ -7,33 +7,37 @@ from datetime import datetime, timedelta
 import pytest
 from ortools.sat.python import cp_model
 
-import eve_courier_optimizer.solver as solver_module
+import eve_courier_optimizer.decomposition as solver_module
 from eve_courier_optimizer.bounds import (
     build_system_relaxation_master,
     hint_system_relaxation_master,
     solve_system_relaxation,
     solve_system_relaxation_master,
 )
-from eve_courier_optimizer.construction import insert_additional_contracts
+from eve_courier_optimizer.construction import (
+    build_greedy_route_hint,
+    improve_incumbent,
+    insert_additional_contracts,
+)
+from eve_courier_optimizer.decomposition import (
+    _solve_reduced_exact_oracle,
+    prove_with_decomposition,
+)
 from eve_courier_optimizer.domain import (
     ActiveShipment,
     CollateralMode,
+    PlannedAction,
+    PlannedWaypoint,
     ProofStatus,
     TravelTimeModel,
 )
+from eve_courier_optimizer.event_model import EventModel
 from eve_courier_optimizer.planning import prepare_problem
 from eve_courier_optimizer.reference_solver import solve_reference
 from eve_courier_optimizer.sde import UniverseGraph
-from eve_courier_optimizer.solver import (
-    SolverConfig,
-    _build_greedy_route_hint,
-    _build_model,
-    _hint_verified_route,
-    _run_dense_decomposition,
-    _solve_reduced_exact_oracle,
-    solve_exact,
-)
-from eve_courier_optimizer.verification import PlannedAction, simulate_and_verify
+from eve_courier_optimizer.search_config import SolverConfig
+from eve_courier_optimizer.solver import solve_exact
+from eve_courier_optimizer.verification import simulate_and_verify
 
 from .conftest import make_contract, make_snapshot
 from .test_bounds import constraints
@@ -105,7 +109,9 @@ def test_resource_work_preserves_rolling_and_active_shipments(
         prepared = prepare_problem(snapshot, tiny_graph, route, active_shipments=active)
         config = SolverConfig(max_time_seconds=3, minimize_finish_time_after_proof=False)
         with monkeypatch.context() as patch:
-            patch.setattr(solver_module, "add_resource_work_bounds", lambda *args: 0)
+            patch.setattr(
+                "eve_courier_optimizer.event_model.add_resource_work_bounds", lambda *args: 0
+            )
             baseline = solve_exact(prepared, tiny_graph, config=config)
         strengthened = solve_exact(prepared, tiny_graph, config=config)
         assert strengthened.certificate.status == baseline.certificate.status
@@ -142,7 +148,7 @@ def test_asymmetric_metric_keeps_valid_reverse_transport(
     prepared = replace(prepared, jump_matrix=directed)
     optimum = solve_reference(prepared).objective_units
     bound = solve_system_relaxation(prepared, max_time_seconds=2)
-    assert optimum == sum(item.contract.reward_units for item in prepared.problem.contracts)
+    assert optimum == sum(item.reward_units for item in prepared.problem.contracts)
     assert bound.upper_bound_units == optimum
 
 
@@ -170,13 +176,11 @@ def test_portfolio_oracle_returns_a_proven_core_without_irrelevant_contracts(
             prepared,
             problem=replace(
                 prepared.problem,
-                contracts=tuple(
-                    i for i in prepared.problem.contracts if i.contract.contract_id != excluded
-                ),
+                contracts=tuple(i for i in prepared.problem.contracts if i.contract_id != excluded),
             ),
         )
         assert solve_reference(subset).objective_units == sum(
-            i.contract.reward_units for i in subset.problem.contracts
+            i.reward_units for i in subset.problem.contracts
         )
 
 
@@ -191,7 +195,7 @@ def test_insertion_uses_shared_haul_and_respects_capacity(
         tiny_graph,
         replace(constraints(now, horizon=50), max_simultaneous_contracts=parcel_limit),
     )
-    visits = _build_greedy_route_hint(prepared)
+    visits = build_greedy_route_hint(prepared)
     ids = tuple(sorted({v.contract_id for v in visits if isinstance(v, PlannedAction)}))
     seed = simulate_and_verify(prepared.problem, tiny_graph, visits, ids)
     assert seed.report.valid and seed.total_reward_units == 100
@@ -213,12 +217,12 @@ def test_complete_hints_are_feasible_with_waypoints_and_resources(
             max_simultaneous_contracts=1,
         ),
     )
-    visits = _build_greedy_route_hint(prepared)
+    visits = build_greedy_route_hint(prepared)
     ids = tuple(sorted({v.contract_id for v in visits if isinstance(v, PlannedAction)}))
     simulation = simulate_and_verify(prepared.problem, tiny_graph, visits, ids)
     assert simulation.report.valid
-    route = _build_model(prepared)
-    _hint_verified_route(route, prepared, visits, ids)
+    route = EventModel(prepared)
+    route.hint(visits, ids)
     master = build_system_relaxation_master(prepared)
     hint_system_relaxation_master(
         master,
@@ -280,6 +284,46 @@ def test_seed_reward_proof_still_refines_duration(
     assert result.finish_seconds == 44
 
 
+def test_duration_search_cannot_replace_a_faster_verified_incumbent(
+    now: datetime, tiny_graph: UniverseGraph, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from eve_courier_optimizer.construction import construct_incumbent
+    from eve_courier_optimizer.decomposition import SelectionCheck
+    from eve_courier_optimizer.domain import ActionKind
+
+    prepared = prepare_problem(
+        make_snapshot(
+            now,
+            *(make_contract(now, i + 1, 101, 103, volume=40, collateral=100) for i in range(20)),
+        ),
+        tiny_graph,
+        constraints(now, horizon=100, collateral=200),
+    )
+    incumbent = construct_incumbent(prepared, tiny_graph)
+    assert incumbent is not None and incumbent.simulation.finish_seconds == 44
+    sequential = tuple(
+        PlannedAction(action, cid)
+        for cid in incumbent.selected_contract_ids
+        for action in (ActionKind.PICKUP, ActionKind.DELIVERY)
+    )
+    slower = simulate_and_verify(
+        prepared.problem, tiny_graph, sequential, incumbent.selected_contract_ids
+    )
+    assert slower.report.valid and slower.finish_seconds == 84
+    refinement = SelectionCheck(
+        cp_model.FEASIBLE, "FEASIBLE", incumbent.selected_contract_ids, slower, (), 0.0, 0, 0
+    )
+    monkeypatch.setattr("eve_courier_optimizer.solver.refine_selection", lambda *args: refinement)
+    result = solve_exact(
+        prepared,
+        tiny_graph,
+        config=SolverConfig(max_time_seconds=1e-8, decomposition_time_seconds=0),
+    )
+    assert result.certificate.status is ProofStatus.PROVEN_OPTIMAL
+    assert result.total_reward_units == incumbent.simulation.total_reward_units
+    assert result.finish_seconds == 44
+
+
 @pytest.mark.parametrize("closes_on_second_solve", [False, True])
 def test_feasible_master_selection_improves_master_without_false_proof(
     now: datetime,
@@ -315,10 +359,45 @@ def test_feasible_master_selection_improves_master_without_false_proof(
 
     monkeypatch.setattr(solver_module, "solve_system_relaxation_master", bounded_master)
     monkeypatch.setattr(solver_module, "solve_batches", lambda *args, **kwargs: None)
-    outcome = _run_dense_decomposition(
+    outcome = prove_with_decomposition(
         prepared, tiny_graph, SolverConfig(minimize_finish_time_after_proof=False)
     )
     assert outcome.status_name == ("bound_matched" if closes_on_second_solve else "incumbent_found")
     assert outcome.iteration_count == 2
     assert outcome.simulation is not None and outcome.simulation.report.valid
     assert not outcome.learned_infeasibility_cores
+
+
+def test_reconstruction_replaces_blocking_choice_and_preserves_waypoints(
+    now: datetime, tiny_graph: UniverseGraph
+) -> None:
+    prepared = prepare_problem(
+        make_snapshot(
+            now,
+            make_contract(now, 1, 101, 101, collateral=100, reward=600),
+            *(
+                make_contract(now, i, 101, 103, volume=40, collateral=50, reward=500)
+                for i in (2, 3)
+            ),
+        ),
+        tiny_graph,
+        replace(constraints(now, horizon=80, collateral=100), required_system_ids=frozenset({2})),
+    )
+    visits = build_greedy_route_hint(prepared)
+    ids = tuple(sorted({v.contract_id for v in visits if isinstance(v, PlannedAction)}))
+    seed = simulate_and_verify(prepared.problem, tiny_graph, visits, ids)
+    _, old = insert_additional_contracts(prepared, tiny_graph, visits, seed)
+    assert old.total_reward_units == 600
+    result, improved = improve_incumbent(
+        prepared,
+        tiny_graph,
+        visits,
+        seed,
+        restart_visits=(PlannedWaypoint(2),),
+    )
+    assert improved.report.valid
+    assert improved.total_reward_units == 1000
+    assert {v.contract_id for v in result if isinstance(v, PlannedAction)} == {2, 3}
+    # A bad restart must never erase an already verified incumbent.
+    _, retained = improve_incumbent(prepared, tiny_graph, visits, seed, restart_visits=())
+    assert retained == old

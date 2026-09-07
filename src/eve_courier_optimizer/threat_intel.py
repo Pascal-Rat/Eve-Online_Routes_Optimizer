@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Final, cast
 
 from .domain import GateEvidence, GateThreatEvent, ThreatCategory, parse_esi_datetime
-from .esi import CacheRecord, EsiResponseCache, Transport, UrllibTransport
+from .http import CacheEntry, ResponseCache, Transport, UrllibTransport, retry_delay
 from .sde import Stargate, UniverseGraph
 
 ZKILL_BASE_URL: Final = "https://zkillboard.com"
@@ -73,7 +73,7 @@ class ZkillClient:
         self,
         *,
         transport: Transport | None = None,
-        cache: EsiResponseCache | None = None,
+        cache: ResponseCache | None = None,
         user_agent: str = DEFAULT_ZKILL_USER_AGENT,
         timeout_seconds: float = 30.0,
         max_retries: int = 3,
@@ -82,9 +82,13 @@ class ZkillClient:
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], float] = time.time,
     ) -> None:
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("zKill timeout must be finite and positive")
+        if max_retries < 0:
+            raise ValueError("zKill retry count cannot be negative")
         if cache_seconds <= 0:
             raise ValueError("zKill cache lifetime must be positive")
-        if request_spacing_seconds < 0:
+        if not math.isfinite(request_spacing_seconds) or request_spacing_seconds < 0:
             raise ValueError("zKill request spacing cannot be negative")
         self.transport = transport or UrllibTransport()
         self.cache = cache
@@ -105,6 +109,9 @@ class ZkillClient:
             except OSError as error:
                 raise ZkillError("zKillboard returned invalid gzip data") from error
         return response_body
+
+    def defer_next_request(self) -> None:
+        self._last_network_request_epoch = self.now()
 
     def _space_request(self) -> None:
         if self._last_network_request_epoch is None:
@@ -127,16 +134,9 @@ class ZkillClient:
 
         if region_id <= 0:
             raise ValueError("zKill region ID must be positive")
-        if (
-            past_seconds <= 0
-            or past_seconds > ZKILL_MAX_PAST_SECONDS
-            or past_seconds % 3_600 != 0
-        ):
+        if past_seconds <= 0 or past_seconds > ZKILL_MAX_PAST_SECONDS or past_seconds % 3_600 != 0:
             raise ValueError("zKill lookback must be an hourly multiple from 1 hour through 7 days")
-        url = (
-            f"{ZKILL_BASE_URL}/api/losses/regionID/{region_id}/"
-            f"pastSeconds/{past_seconds}/"
-        )
+        url = f"{ZKILL_BASE_URL}/api/losses/regionID/{region_id}/pastSeconds/{past_seconds}/"
         cached = self.cache.get(url) if self.cache is not None else None
         if cached is not None and cached.expires_epoch > self.now():
             return self._parse_rows(cached.body)
@@ -158,23 +158,24 @@ class ZkillClient:
                 raise ZkillError(f"zKillboard network request failed for {url}") from error
             body = self._body(response.body, response.headers)
             if 200 <= response.status < 300:
+                rows = self._parse_rows(body)
                 if self.cache is not None:
                     self.cache.put(
-                        CacheRecord(
-                            url=url,
+                        CacheEntry(
+                            key=url,
                             etag=response.headers.get("etag"),
                             expires_epoch=self.now() + self.cache_seconds,
                             body=body,
-                            headers_json=json.dumps(dict(response.headers), sort_keys=True),
+                            headers=response.headers,
                         )
                     )
-                return self._parse_rows(body)
+                return rows
             if response.status == 429 and attempt < self.max_retries:
-                try:
-                    retry_after = float(response.headers.get("retry-after", "5"))
-                except ValueError:
-                    retry_after = 5.0
-                self.sleep(max(1.0, retry_after))
+                self.sleep(
+                    retry_delay(
+                        response.headers.get("retry-after"), now_epoch=self.now(), default=5.0
+                    )
+                )
                 continue
             if response.status >= 500 and attempt < self.max_retries:
                 self.sleep(float(min(2**attempt, 8)))
@@ -297,9 +298,7 @@ def classify_gate_threat(
     except (KeyError, TypeError, ValueError):
         return None
     ship_type_ids = _positive_ids(attacker.get("ship_type_id") for attacker in player_attackers)
-    weapon_type_ids = _positive_ids(
-        attacker.get("weapon_type_id") for attacker in player_attackers
-    )
+    weapon_type_ids = _positive_ids(attacker.get("weapon_type_id") for attacker in player_attackers)
     ship_groups = {
         group.group_id
         for type_id in ship_type_ids
@@ -313,9 +312,7 @@ def classify_gate_threat(
     victim_group = graph.item_group(victim_ship_type_id)
     labels_raw = zkb.get("labels", [])
     labels = tuple(
-        sorted({str(label) for label in labels_raw})
-        if isinstance(labels_raw, list)
-        else ()
+        sorted({str(label) for label in labels_raw}) if isinstance(labels_raw, list) else ()
     )
 
     categories = {ThreatCategory.ANY_GATE_PVP}

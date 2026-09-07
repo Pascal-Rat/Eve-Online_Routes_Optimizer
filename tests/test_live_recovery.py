@@ -21,8 +21,8 @@ from eve_courier_optimizer.execution import (
 )
 from eve_courier_optimizer.sde import UniverseGraph
 from eve_courier_optimizer.service import PlannerService
+from eve_courier_optimizer.session import PlanningSession
 from eve_courier_optimizer.snapshot import write_snapshot
-from eve_courier_optimizer.webapp import LocalWebApplication
 
 from .conftest import make_contract, make_snapshot
 from .test_execution import constraints
@@ -37,6 +37,29 @@ class MutableClock:
         return self.value
 
 
+def test_failed_reset_keeps_live_commitments(
+    now: datetime, tiny_graph: UniverseGraph, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = PlanningSession(tiny_graph, EsiClient(), tmp_path, clock=MutableClock(now))
+    app.snapshot = make_snapshot(now, make_contract(now, 1, 101, 102))
+    app.solve(planning_payload())
+    app.start_execution({"confirm_locked_acceptance": True})
+    state = app.execution
+    assert state is not None and state.active_shipments
+    original_unlink = Path.unlink
+
+    def fail(path: Path, missing_ok: bool = False) -> None:
+        if path == app.execution_path:
+            raise OSError("disk unavailable")
+        original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail)
+    with pytest.raises(OSError, match="disk unavailable"):
+        app.reset_execution()
+    assert app.execution == state
+    assert read_execution_state(app.execution_path) == state
+
+
 def test_locked_pickups_enforce_cargo_and_validate_persisted_state(
     now: datetime,
     tiny_graph: UniverseGraph,
@@ -45,8 +68,8 @@ def test_locked_pickups_enforce_cargo_and_validate_persisted_state(
         now, make_contract(now, 1, 101, 102, volume=15), make_contract(now, 2, 101, 103, volume=15)
     )
     service = PlannerService(tiny_graph, EsiClient())
-    prepared, result = service.solve(snapshot, constraints(now, CollateralMode.LOCKED))
-    state = service.arm(prepared, result, at=now)
+    plan = service.solve(snapshot, constraints(now, CollateralMode.LOCKED))
+    state = service.arm(plan, at=now)
     assert len(state.active_shipments) == 2
     picked = record_pickup(state, None, tiny_graph, 1, now)
     with pytest.raises(ValueError, match="cargo capacity"):
@@ -72,11 +95,11 @@ def test_progress_outlives_horizon_and_extension_preserves_commitments(
 ) -> None:
     snapshot = make_snapshot(now, make_contract(now, 1, 101, 102))
     service = PlannerService(tiny_graph, EsiClient())
-    prepared, result = service.solve(
+    plan = service.solve(
         snapshot,
         replace(constraints(now, CollateralMode.LOCKED), required_system_ids=frozenset({3})),
     )
-    state = service.arm(prepared, result, at=now)
+    state = service.arm(plan, at=now)
     later = now + timedelta(hours=2)
     picked = record_pickup(state, None, tiny_graph, 1, later)
     with pytest.raises(ValueError, match="extend the horizon"):
@@ -126,18 +149,18 @@ def test_live_clock_filters_old_listings_and_revalidates_departure(
     tmp_path: Path,
 ) -> None:
     clock = MutableClock(now)
-    app = LocalWebApplication(tiny_graph, EsiClient(), tmp_path, clock=clock)
+    app = PlanningSession(tiny_graph, EsiClient(), tmp_path, clock=clock)
     contract = replace(make_contract(now, 1, 101, 102), date_expired=now + timedelta(minutes=1))
     app.snapshot = make_snapshot(now, contract)
     app.solve(planning_payload())
-    assert app.prepared is not None
-    assert app.prepared.problem.constraints.snapshot_time == now
+    assert app.plan is not None
+    assert app.plan.prepared.problem.constraints.snapshot_time == now
     clock.value += timedelta(minutes=2)
     with pytest.raises(ValueError, match="listing has expired"):
         app.start_execution({"confirm_locked_acceptance": True})
     assert app.execution is None
     assert app.solve(planning_payload())["plan"]["summary"]["selected_contract_ids"] == []
-    assert app.prepared.problem.constraints.snapshot_time == clock.value
+    assert app.plan.prepared.problem.constraints.snapshot_time == clock.value
 
 
 def test_replan_arming_rechecks_remaining_horizon(
@@ -146,14 +169,12 @@ def test_replan_arming_rechecks_remaining_horizon(
 ) -> None:
     service = PlannerService(tiny_graph, EsiClient())
     snapshot = make_snapshot(now, make_contract(now, 1, 101, 102))
-    prepared, result = service.solve(snapshot, constraints(now, CollateralMode.LOCKED))
-    state = service.arm(prepared, result, at=now)
-    prepared, result = service.replan(snapshot, state)
+    plan = service.solve(snapshot, constraints(now, CollateralMode.LOCKED))
+    state = service.arm(plan, at=now)
+    plan = service.replan(snapshot, state)
     with pytest.raises(ValueError, match="departure revalidation failed"):
-        service.arm(
-            prepared, result, at=state.session_deadline - timedelta(seconds=1), previous=state
-        )
-    armed = service.arm(prepared, result, at=now + timedelta(microseconds=123), previous=state)
+        service.arm(plan, at=state.session_deadline - timedelta(seconds=1), previous=state)
+    armed = service.arm(plan, at=now + timedelta(microseconds=123), previous=state)
     assert armed.session_deadline == state.session_deadline
     assert armed.active_shipments == state.active_shipments
 
@@ -163,7 +184,7 @@ def test_web_rank_is_strict_json_and_scan_invalidates_saved_plan(
     tiny_graph: UniverseGraph,
     tmp_path: Path,
 ) -> None:
-    app = LocalWebApplication(
+    app = PlanningSession(
         tiny_graph, EsiClient(transport=CourierTransport(now)), tmp_path, clock=MutableClock(now)
     )
     app.snapshot = make_snapshot(now, make_contract(now, 1, 101, 101, collateral=0))
@@ -178,9 +199,9 @@ def test_web_rank_is_strict_json_and_scan_invalidates_saved_plan(
     saved_plan = app.plan_path.read_text()
     app.scan({"regions": [10]})
     assert not app.plan_path.exists()
-    assert LocalWebApplication(tiny_graph, EsiClient(), tmp_path).status()["plan"] is None
+    assert PlanningSession(tiny_graph, EsiClient(), tmp_path).status()["plan"] is None
     app.plan_path.write_text(saved_plan)
-    assert LocalWebApplication(tiny_graph, EsiClient(), tmp_path).status()["plan"] is None
+    assert PlanningSession(tiny_graph, EsiClient(), tmp_path).status()["plan"] is None
 
 
 def test_infeasible_replan_keeps_commitments_and_can_extend_or_record(
@@ -189,7 +210,7 @@ def test_infeasible_replan_keeps_commitments_and_can_extend_or_record(
     tmp_path: Path,
 ) -> None:
     clock = MutableClock(now)
-    app = LocalWebApplication(tiny_graph, EsiClient(), tmp_path, clock=clock)
+    app = PlanningSession(tiny_graph, EsiClient(), tmp_path, clock=clock)
     app.snapshot = make_snapshot(now, make_contract(now, 1, 101, 102))
     app.solve(planning_payload())
     app.start_execution({"confirm_locked_acceptance": True})
@@ -218,18 +239,18 @@ def test_departure_revalidation_keeps_absolute_shipment_deadlines(
 ) -> None:
     service = PlannerService(tiny_graph, EsiClient())
     snapshot = make_snapshot(now, make_contract(now, 1, 101, 102))
-    prepared, result = service.solve(snapshot, constraints(now, CollateralMode.LOCKED))
-    state = service.arm(prepared, result, at=now)
+    plan = service.solve(snapshot, constraints(now, CollateralMode.LOCKED))
+    state = service.arm(plan, at=now)
     state = replace(
         state,
         active_shipments=(
             replace(state.active_shipments[0], deadline=now + timedelta(seconds=30)),
         ),
     )
-    prepared, result = service.replan(snapshot, state)
-    assert result.certificate.feasibility_verified
+    plan = service.replan(snapshot, state)
+    assert plan.result.certificate.feasibility_verified
     with pytest.raises(ValueError, match="departure revalidation failed"):
-        service.arm(prepared, result, at=now + timedelta(seconds=31), previous=state)
+        service.arm(plan, at=now + timedelta(seconds=31), previous=state)
 
 
 def test_cli_live_departure_and_embedded_accepted_pickup(

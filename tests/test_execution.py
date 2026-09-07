@@ -29,7 +29,8 @@ from eve_courier_optimizer.execution import (
 )
 from eve_courier_optimizer.planning import prepare_problem
 from eve_courier_optimizer.sde import UniverseGraph
-from eve_courier_optimizer.solver import SolverConfig, solve_exact
+from eve_courier_optimizer.search_config import SolverConfig
+from eve_courier_optimizer.solver import solve_exact
 
 from .conftest import make_contract, make_snapshot
 
@@ -233,7 +234,7 @@ def test_replan_refreshes_gank_activity_and_exempts_mandatory_endpoints(
         system_kills_fetched_at=None,
         system_kill_activity=(),
     )
-    with pytest.raises(ValueError, match="no system-kill activity"):
+    with pytest.raises(ValueError, match="system-kill activity"):
         constraints_for_replan(state, without_activity)
 
 
@@ -309,7 +310,7 @@ def test_replan_refreshes_gate_threats_and_preserves_auditable_policy(
     write_execution_state(path, state)
     assert read_execution_state(path) == state
 
-    with pytest.raises(ValueError, match="no zKill intel"):
+    with pytest.raises(ValueError, match="zKill intel"):
         constraints_for_replan(
             state,
             replace(

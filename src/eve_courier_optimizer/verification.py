@@ -15,6 +15,9 @@ from .domain import (
     ActionKind,
     ActiveShipment,
     CollateralMode,
+    PlannedAction,
+    PlannedVisit,
+    PlannedWaypoint,
     PlanningConstraints,
     RoutableContract,
     RouteProblem,
@@ -22,26 +25,9 @@ from .domain import (
     TravelLeg,
     TravelLegKind,
     ValidationReport,
+    planned_visits,
 )
 from .sde import UniverseGraph
-
-
-@dataclass(frozen=True, slots=True)
-class PlannedAction:
-    """A pickup or delivery chosen by the optimizer."""
-
-    action: ActionKind
-    contract_id: int
-
-
-@dataclass(frozen=True, slots=True)
-class PlannedWaypoint:
-    """A system that the route must visit without servicing a contract there."""
-
-    system_id: int
-
-
-type PlannedVisit = PlannedAction | PlannedWaypoint
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +37,40 @@ class SimulationResult:
     total_reward_units: int
     finish_seconds: int
     report: ValidationReport
+
+    @property
+    def visits(self) -> tuple[PlannedVisit, ...]:
+        return planned_visits(self.travel_legs)
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedRoute:
+    selected_contract_ids: tuple[int, ...]
+    simulation: SimulationResult
+
+    def __post_init__(self) -> None:
+        if not self.simulation.report.valid:
+            raise ValueError("incumbent must pass independent route verification")
+
+    @property
+    def quality(self) -> tuple[int, int]:
+        return self.simulation.total_reward_units, -self.simulation.finish_seconds
+
+    @classmethod
+    def verify(
+        cls,
+        problem: RouteProblem,
+        graph: UniverseGraph,
+        visits: tuple[PlannedVisit, ...],
+        selected_contract_ids: tuple[int, ...],
+    ) -> VerifiedRoute:
+        simulation = simulate_and_verify(problem, graph, visits, selected_contract_ids)
+        if not simulation.report.valid:
+            raise RuntimeError(
+                "solver route failed independent verification: "
+                + "; ".join(simulation.report.violations)
+            )
+        return cls(selected_contract_ids, simulation)
 
 
 @dataclass(slots=True)
@@ -87,16 +107,16 @@ def _initial_simulation_state(
 
     constraints = problem.constraints
     cargo_load_units = sum(
-        shipment.contract.contract.volume_units
+        shipment.contract.volume_units
         for shipment in active_shipment_by_id.values()
         if shipment.picked
     )
     locked_collateral_units = sum(
-        shipment.contract.contract.collateral_units for shipment in active_shipment_by_id.values()
+        shipment.contract.collateral_units for shipment in active_shipment_by_id.values()
     )
     if constraints.collateral_mode is CollateralMode.LOCKED:
         locked_collateral_units += sum(
-            optional_contract_by_id[contract_id].contract.collateral_units
+            optional_contract_by_id[contract_id].collateral_units
             for contract_id in selected_contract_ids
             if contract_id in optional_contract_by_id
         )
@@ -221,12 +241,12 @@ def _apply_pickup(
 
     state.picked_contract_ids.add(contract_id)
     state.pickup_time_by_contract_id[contract_id] = arrival_seconds
-    state.cargo_load_units += contract.contract.volume_units
+    state.cargo_load_units += contract.volume_units
 
     if constraints.collateral_mode is CollateralMode.ROLLING and active_shipment is None:
-        state.locked_collateral_units += contract.contract.collateral_units
+        state.locked_collateral_units += contract.collateral_units
         acceptance_time = constraints.snapshot_time + timedelta(seconds=arrival_seconds)
-        if acceptance_time >= contract.contract.date_expired:
+        if acceptance_time >= contract.date_expired:
             state.violations.append(f"contract {contract_id} accepted after listing expiry")
 
 
@@ -245,25 +265,25 @@ def _apply_delivery(
         state.violations.append(f"contract {contract_id} delivered more than once")
 
     state.delivered_contract_ids.add(contract_id)
-    state.cargo_load_units -= contract.contract.volume_units
-    state.locked_collateral_units -= contract.contract.collateral_units
-    state.earned_reward_units += contract.contract.reward_units
+    state.cargo_load_units -= contract.volume_units
+    state.locked_collateral_units -= contract.collateral_units
+    state.earned_reward_units += contract.reward_units
 
     if active_shipment is not None:
-        deadline_seconds = int(
-            (active_shipment.deadline - constraints.snapshot_time).total_seconds()
-        )
+        deadline = active_shipment.deadline
     elif constraints.collateral_mode is CollateralMode.LOCKED:
-        deadline_seconds = contract.contract.days_to_complete * 86_400
+        deadline = constraints.snapshot_time + timedelta(days=contract.days_to_complete)
     else:
         pickup_seconds = state.pickup_time_by_contract_id.get(contract_id)
         if pickup_seconds is None:
             # The missing pickup has already been recorded above. Without its time there is no
             # meaningful rolling deadline to check.
             return
-        deadline_seconds = pickup_seconds + contract.contract.days_to_complete * 86_400
+        deadline = constraints.snapshot_time + timedelta(
+            seconds=pickup_seconds, days=contract.days_to_complete
+        )
 
-    if completion_seconds > deadline_seconds:
+    if constraints.snapshot_time + timedelta(seconds=completion_seconds) > deadline:
         contract_kind = "active shipment" if active_shipment is not None else "contract"
         state.violations.append(f"{contract_kind} {contract_id} misses its deadline")
 
@@ -315,9 +335,7 @@ def _execute_contract_action(
     is_pickup = planned_action.action is ActionKind.PICKUP
     target_system_id = contract.origin_system_id if is_pickup else contract.destination_system_id
     target_location_id = (
-        contract.contract.origin_location_id
-        if is_pickup
-        else contract.contract.destination_location_id
+        contract.origin_location_id if is_pickup else contract.destination_location_id
     )
     jump_path = graph.shortest_path(
         state.current_system_id,
@@ -458,11 +476,9 @@ def simulate_and_verify(
     """Replay a proposed route and independently check every planning constraint."""
 
     constraints = problem.constraints
-    optional_contract_by_id = {
-        contract.contract.contract_id: contract for contract in problem.contracts
-    }
+    optional_contract_by_id = {contract.contract_id: contract for contract in problem.contracts}
     active_shipment_by_id = {
-        shipment.contract.contract.contract_id: shipment for shipment in problem.active_shipments
+        shipment.contract.contract_id: shipment for shipment in problem.active_shipments
     }
     selected_contract_id_set = set(selected_contract_ids)
     state = _initial_simulation_state(

@@ -6,10 +6,12 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from eve_courier_optimizer.decomposition import prove_with_decomposition
 from eve_courier_optimizer.domain import (
     ActionKind,
     ActiveShipment,
     CollateralMode,
+    PlannedAction,
     PlanningConstraints,
     ProofStatus,
     RoutableContract,
@@ -20,8 +22,9 @@ from eve_courier_optimizer.domain import (
 from eve_courier_optimizer.planning import PreparedProblem, prepare_problem
 from eve_courier_optimizer.reference_solver import solve_reference
 from eve_courier_optimizer.sde import UniverseGraph
-from eve_courier_optimizer.solver import SolverConfig, _run_dense_decomposition, solve_exact
-from eve_courier_optimizer.verification import PlannedAction, simulate_and_verify
+from eve_courier_optimizer.search_config import SolverConfig
+from eve_courier_optimizer.solver import solve_exact
+from eve_courier_optimizer.verification import simulate_and_verify
 
 from .conftest import make_contract, make_snapshot
 
@@ -222,10 +225,12 @@ def test_decomposition_learns_higher_order_cargo_infeasibility(
     monkeypatch: pytest.MonkeyPatch,
     use_subset_search: bool,
 ) -> None:
-    monkeypatch.setattr("eve_courier_optimizer.solver.solve_batches", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "eve_courier_optimizer.decomposition.solve_batches", lambda *args, **kwargs: None
+    )
     if not use_subset_search:
         monkeypatch.setattr(
-            "eve_courier_optimizer.solver.solve_subset", lambda *args, **kwargs: None
+            "eve_courier_optimizer.decomposition.solve_subset", lambda *args, **kwargs: None
         )
     contracts = tuple(
         make_contract(
@@ -245,7 +250,7 @@ def test_decomposition_learns_higher_order_cargo_infeasibility(
         constraints(now, cargo=100, collateral=200, horizon=50),
     )
 
-    outcome = _run_dense_decomposition(
+    outcome = prove_with_decomposition(
         prepared,
         tiny_graph,
         SolverConfig(
@@ -280,7 +285,7 @@ def test_active_picked_shipment_can_make_model_infeasible(
     tiny_graph: UniverseGraph,
 ) -> None:
     public = make_contract(now, 9, 101, 103, reward=1_000)
-    routable = RoutableContract(public, 1, 3)
+    routable = RoutableContract.resolve(public, 1, 3)
     active = ActiveShipment(routable, deadline=now + timedelta(seconds=5), picked=True)
     snapshot = make_snapshot(now)
     prepared = prepare_problem(
@@ -299,7 +304,7 @@ def test_committed_unpicked_contract_is_mandatory_and_ordered(
     tiny_graph: UniverseGraph,
 ) -> None:
     public = make_contract(now, 9, 102, 103, reward=1_000)
-    routable = RoutableContract(public, 2, 3)
+    routable = RoutableContract.resolve(public, 2, 3)
     active = ActiveShipment(routable, deadline=now + timedelta(hours=1), picked=False)
     prepared = prepare_problem(
         make_snapshot(now),
@@ -396,3 +401,57 @@ def test_reference_solver_rejects_unsupported_modes(
     )
     with pytest.raises(ValueError, match="locked collateral"):
         solve_reference(prepared)
+
+
+@pytest.mark.parametrize("deadline_offset_us, feasible", [(-1, False), (0, True), (1, True)])
+def test_active_delivery_deadline_is_inclusive_at_subsecond_precision(
+    now: datetime,
+    tiny_graph: UniverseGraph,
+    deadline_offset_us: int,
+    feasible: bool,
+) -> None:
+    contract = RoutableContract.resolve(make_contract(now, 1, 101, 101), 1, 1)
+    shipment = ActiveShipment(contract, now + timedelta(microseconds=deadline_offset_us))
+    prepared = prepare_problem(
+        make_snapshot(now),
+        tiny_graph,
+        replace(constraints(now, horizon=0), travel=TravelTimeModel(1, 0)),
+        active_shipments=(shipment,),
+    )
+    simulation = simulate_and_verify(
+        prepared.problem,
+        tiny_graph,
+        (PlannedAction(ActionKind.DELIVERY, 1),),
+        (),
+    )
+    assert simulation.report.valid is feasible
+    result = solve_exact(
+        prepared, tiny_graph, config=SolverConfig(minimize_finish_time_after_proof=False)
+    )
+    assert result.certificate.status is (
+        ProofStatus.PROVEN_OPTIMAL if feasible else ProofStatus.PROVEN_INFEASIBLE
+    )
+
+
+def test_tiny_budget_retains_mandatory_delivery_incumbent(
+    now: datetime, tiny_graph: UniverseGraph
+) -> None:
+    contract = RoutableContract.resolve(make_contract(now, 1, 101, 101), 1, 1)
+    prepared = prepare_problem(
+        make_snapshot(now),
+        tiny_graph,
+        replace(constraints(now, horizon=0), travel=TravelTimeModel(1, 0)),
+        active_shipments=(ActiveShipment(contract, now + timedelta(hours=1)),),
+    )
+    result = solve_exact(
+        prepared,
+        tiny_graph,
+        config=SolverConfig(
+            max_time_seconds=1e-8,
+            minimize_finish_time_after_proof=False,
+        ),
+    )
+    assert result.total_reward_units == contract.reward_units
+    assert result.certificate.status is ProofStatus.PROVEN_OPTIMAL
+    assert result.selected_contract_ids == ()
+    assert result.route[0].contract_id == 1

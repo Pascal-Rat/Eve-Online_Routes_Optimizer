@@ -9,10 +9,10 @@ from ortools.sat.python import cp_model
 
 from eve_courier_optimizer.bounds import SubsetRewardCut, add_subset_reward_cut
 from eve_courier_optimizer.domain import ActiveShipment, CollateralMode, TravelTimeModel
+from eve_courier_optimizer.event_model import EventModel
 from eve_courier_optimizer.planning import prepare_problem
 from eve_courier_optimizer.reference_solver import solve_reference
 from eve_courier_optimizer.sde import UniverseGraph
-from eve_courier_optimizer.solver import _build_model, _extract_visits
 from eve_courier_optimizer.subset_search import solve_subset
 from eve_courier_optimizer.verification import simulate_and_verify
 
@@ -67,12 +67,12 @@ def test_subset_search_matches_independent_reference_and_verifies_witnesses(
                         contracts=tuple(
                             i
                             for i in p.problem.contracts
-                            if i.contract.contract_id in core and i.contract.contract_id != removed
+                            if i.contract_id in core and i.contract_id != removed
                         ),
                     ),
                 )
                 feasible = solve_reference(subset).objective_units == sum(
-                    i.contract.reward_units for i in subset.problem.contracts
+                    i.reward_units for i in subset.problem.contracts
                 )
                 assert feasible == (removed is not None)
 
@@ -107,7 +107,7 @@ def test_subset_search_rolling_expiry_matches_event_model(
         p = prepare_problem(make_snapshot(now, *items), tiny_graph, c)
         answer = solve_subset(p, max_time_seconds=3)
         assert answer is not None and answer.complete
-        route = _build_model(p)
+        route = EventModel(p)
         cp = cp_model.CpSolver()
         cp.parameters.num_search_workers = 1
         cp.parameters.max_time_in_seconds = 3
@@ -179,14 +179,12 @@ def test_subset_reward_cut_excludes_more_than_the_full_selection(
     )
     answer = solve_subset(p, max_time_seconds=1)
     assert answer is not None and answer.upper_bound_units == 300
-    route = _build_model(p)
-    cut = SubsetRewardCut(
-        tuple((i.contract.contract_id, i.contract.reward_units) for i in p.problem.contracts), 300
-    )
+    route = EventModel(p)
+    cut = SubsetRewardCut(tuple((i.contract_id, i.reward_units) for i in p.problem.contracts), 300)
     add_subset_reward_cut(route.model, route.contract_is_selected, cut)
     cp = cp_model.CpSolver()
     assert cp.solve(route.model) == cp_model.OPTIMAL
-    visits, ids = _extract_visits(route, cp)
+    visits, ids = route.extract(cp)
     assert simulate_and_verify(p.problem, tiny_graph, visits, ids).total_reward_units == 300
     route.model.add(route.contract_is_selected[2] == 1)
     route.model.add(route.contract_is_selected[3] == 1)

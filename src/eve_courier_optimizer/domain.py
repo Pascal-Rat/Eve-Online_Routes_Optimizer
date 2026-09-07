@@ -10,8 +10,8 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal
+from datetime import UTC, datetime, timedelta
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Final
 
@@ -33,7 +33,10 @@ _ISK_PATTERN: Final = re.compile(
 def _decimal(value: Decimal | int | float | str) -> Decimal:
     if isinstance(value, Decimal):
         return value
-    return Decimal(str(value))
+    try:
+        return Decimal(str(value))
+    except InvalidOperation as error:
+        raise ValueError("expected a decimal number") from error
 
 
 def cargo_volume_to_units(value_m3: Decimal | int | float | str) -> int:
@@ -114,6 +117,20 @@ class CollateralMode(StrEnum):
 class ActionKind(StrEnum):
     PICKUP = "pickup"
     DELIVERY = "delivery"
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedAction:
+    action: ActionKind
+    contract_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedWaypoint:
+    system_id: int
+
+
+type PlannedVisit = PlannedAction | PlannedWaypoint
 
 
 class TravelLegKind(StrEnum):
@@ -206,13 +223,16 @@ class GateThreatEvent:
     zkill_labels: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if min(
-            self.killmail_id,
-            self.system_id,
-            self.region_id,
-            self.gate_id,
-            self.victim_ship_type_id,
-        ) <= 0:
+        if (
+            min(
+                self.killmail_id,
+                self.system_id,
+                self.region_id,
+                self.gate_id,
+                self.victim_ship_type_id,
+            )
+            <= 0
+        ):
             raise ValueError("gate-threat identifiers must be positive")
         if self.occurred_at.tzinfo is None:
             raise ValueError("gate-threat timestamp must be timezone-aware")
@@ -253,16 +273,48 @@ class PublicCourierContract:
         if self.date_expired.tzinfo is None:
             raise ValueError("date_expired must be timezone-aware")
 
+    def last_pickup_second(self, departure: datetime) -> int:
+        """Last integral arrival strictly before listing expiry, including fractional seconds."""
+        remaining = self.date_expired - departure
+        microseconds = (
+            remaining.days * 86_400 + remaining.seconds
+        ) * 1_000_000 + remaining.microseconds
+        return (microseconds - 1) // 1_000_000
 
-@dataclass(frozen=True, slots=True)
-class RoutableContract:
-    contract: PublicCourierContract
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RoutableContract(PublicCourierContract):
+    """A public courier whose NPC station endpoints have been resolved in the SDE."""
+
     origin_system_id: int
     destination_system_id: int
 
     def __post_init__(self) -> None:
+        PublicCourierContract.__post_init__(self)
         if self.origin_system_id <= 0 or self.destination_system_id <= 0:
             raise ValueError("system IDs must be positive")
+
+    @classmethod
+    def resolve(
+        cls,
+        contract: PublicCourierContract,
+        origin_system_id: int,
+        destination_system_id: int,
+    ) -> RoutableContract:
+        return cls(
+            contract_id=contract.contract_id,
+            origin_location_id=contract.origin_location_id,
+            destination_location_id=contract.destination_location_id,
+            volume_units=contract.volume_units,
+            collateral_units=contract.collateral_units,
+            reward_units=contract.reward_units,
+            date_expired=contract.date_expired,
+            days_to_complete=contract.days_to_complete,
+            title=contract.title,
+            date_issued=contract.date_issued,
+            origin_system_id=origin_system_id,
+            destination_system_id=destination_system_id,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +332,10 @@ class ActiveShipment:
     def __post_init__(self) -> None:
         if self.deadline.tzinfo is None:
             raise ValueError("active-shipment deadline must be timezone-aware")
+
+    def last_delivery_second(self, departure: datetime) -> int:
+        """Delivery completion is inclusive; a deadline before departure stays negative."""
+        return (self.deadline - departure) // timedelta(seconds=1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +377,8 @@ class SecurityPolicy:
     threat_incomplete_region_ids: frozenset[int] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
+        if self.minimum_security is not None and not math.isfinite(self.minimum_security):
+            raise ValueError("minimum security must be finite")
         if self.allowed_bands is not None and not self.allowed_bands:
             raise ValueError("at least one security band must be allowed")
         if self.gank_ship_kill_threshold is not None and self.gank_ship_kill_threshold <= 0:
@@ -369,9 +427,7 @@ class SecurityPolicy:
             return "gank_activity_policy"
         if self.allowed_bands is not None:
             return (
-                None
-                if security_band(security_status) in self.allowed_bands
-                else "security_policy"
+                None if security_band(security_status) in self.allowed_bands else "security_policy"
             )
         if self.minimum_security is not None and security_status < self.minimum_security:
             return "security_policy"
@@ -449,6 +505,26 @@ class RouteProblem:
     scope: ProblemScope
     active_shipments: tuple[ActiveShipment, ...] = ()
 
+    @property
+    def committed_reward_units(self) -> int:
+        return sum(shipment.contract.reward_units for shipment in self.active_shipments)
+
+    @property
+    def initial_cargo_units(self) -> int:
+        return sum(s.contract.volume_units for s in self.active_shipments if s.picked)
+
+    @property
+    def initial_collateral_units(self) -> int:
+        return sum(s.contract.collateral_units for s in self.active_shipments)
+
+    @property
+    def initial_parcel_count(self) -> int:
+        return sum(s.picked for s in self.active_shipments)
+
+    @property
+    def mandatory_action_count(self) -> int:
+        return sum(1 if s.picked else 2 for s in self.active_shipments)
+
 
 @dataclass(frozen=True, slots=True)
 class RouteStep:
@@ -475,6 +551,18 @@ class TravelLeg:
     completion_seconds: int
     jump_path: tuple[int, ...]
     contract_id: int | None = None
+
+
+def planned_visits(legs: tuple[TravelLeg, ...]) -> tuple[PlannedVisit, ...]:
+    visits: list[PlannedVisit] = []
+    for leg in legs:
+        if leg.kind is TravelLegKind.WAYPOINT:
+            visits.append(PlannedWaypoint(leg.to_system_id))
+        elif leg.kind in {TravelLegKind.PICKUP, TravelLegKind.DELIVERY}:
+            if leg.contract_id is None:
+                raise ValueError("courier travel leg requires a contract ID")
+            visits.append(PlannedAction(ActionKind(leg.kind.value), leg.contract_id))
+    return tuple(visits)
 
 
 @dataclass(frozen=True, slots=True)

@@ -7,11 +7,10 @@ import time
 
 from ortools.sat.python import cp_model
 
-from .bounds import _integer_upper_bound
-from .domain import ActionKind, CollateralMode
+from .bounds import integer_upper_bound
+from .domain import ActionKind, CollateralMode, PlannedAction
 from .planning import PreparedProblem
 from .subset_search import SubsetSearchResult
-from .verification import PlannedAction
 
 
 def solve_batches(
@@ -38,7 +37,7 @@ def solve_batches(
         or problem.active_shipments
         or c.required_system_ids
         or c.collateral_mode is not CollateralMode.LOCKED
-        or any(i.contract.days_to_complete * 86_400 < c.horizon_seconds for i in items)
+        or any(i.days_to_complete * 86_400 < c.horizon_seconds for i in items)
     ):
         return None
     origin, destination = next(iter(lanes))
@@ -69,7 +68,7 @@ def solve_batches(
 
     model = cp_model.CpModel()
     used = [model.new_bool_var(f"batch_{b}") for b in range(trips)]
-    selected = [model.new_bool_var(f"selected_{i.contract.contract_id}") for i in items]
+    selected = [model.new_bool_var(f"selected_{i.contract_id}") for i in items]
     assigned = [
         [model.new_bool_var(f"job_{i}_batch_{b}") for b in range(trips)] for i in range(len(items))
     ]
@@ -81,19 +80,19 @@ def solve_batches(
         model.add(count >= used[b])
         model.add(count <= len(items) * used[b])
         model.add(
-            sum(item.contract.volume_units * assigned[i][b] for i, item in enumerate(items))
+            sum(item.volume_units * assigned[i][b] for i, item in enumerate(items))
             <= c.cargo_capacity_units
         )
         if c.max_simultaneous_contracts is not None:
             model.add(count <= c.max_simultaneous_contracts)
         batch_rewards.append(
-            sum(item.contract.reward_units * assigned[i][b] for i, item in enumerate(items))
+            sum(item.reward_units * assigned[i][b] for i, item in enumerate(items))
         )
         if b:
             model.add(used[b] <= used[b - 1])
             model.add(batch_rewards[b] <= batch_rewards[b - 1])
     model.add(
-        sum(item.contract.collateral_units * selected[i] for i, item in enumerate(items))
+        sum(item.collateral_units * selected[i] for i, item in enumerate(items))
         <= c.collateral_budget_units
     )
     if trips:
@@ -103,7 +102,7 @@ def solve_batches(
             + 2 * c.travel.service_seconds * sum(selected)
             <= c.horizon_seconds
         )
-    reward = sum(item.contract.reward_units * selected[i] for i, item in enumerate(items))
+    reward = sum(item.reward_units * selected[i] for i, item in enumerate(items))
     model.maximize(reward)
     remaining = max_time_seconds - (time.perf_counter() - started)
     if model.validate() or remaining <= 0:
@@ -119,9 +118,7 @@ def solve_batches(
     visits: list[PlannedAction] = []
     ids = []
     for b in range(trips):
-        batch = sorted(
-            item.contract.contract_id for i, item in enumerate(items) if cp.value(assigned[i][b])
-        )
+        batch = sorted(item.contract_id for i, item in enumerate(items) if cp.value(assigned[i][b]))
         ids.extend(batch)
         visits.extend(PlannedAction(ActionKind.PICKUP, cid) for cid in batch)
         visits.extend(PlannedAction(ActionKind.DELIVERY, cid) for cid in batch)
@@ -129,7 +126,7 @@ def solve_batches(
     upper = (
         objective
         if status == cp_model.OPTIMAL
-        else max(objective, _integer_upper_bound(cp.best_objective_bound))
+        else max(objective, integer_upper_bound(cp.best_objective_bound))
     )
     return SubsetSearchResult(
         objective,

@@ -28,8 +28,9 @@ from eve_courier_optimizer.sde import (
     SolarSystem,
     UniverseGraph,
 )
+from eve_courier_optimizer.search_config import SolverConfig
 from eve_courier_optimizer.snapshot import ContractSnapshot, read_snapshot
-from eve_courier_optimizer.solver import SolverConfig, solve_exact
+from eve_courier_optimizer.solver import solve_exact
 
 from .run_empire import FIXTURE, PROFILES, _constraints, load_empire_graph
 
@@ -113,7 +114,7 @@ def prepare_case(name: str, *, seed: int = 17) -> tuple[UniverseGraph, PreparedP
     return graph, prepare_problem(snapshot, graph, constraints)
 
 
-def main(*, experiment: dict[str, str] | None = None) -> int:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", nargs="+", choices=CASES, default=CASES)
     parser.add_argument("--time-limit", type=float, default=30)
@@ -166,6 +167,8 @@ def main(*, experiment: dict[str, str] | None = None) -> int:
             bound=c.best_bound_units,
             gap=c.relative_gap,
             selected=len(result.selected_contract_ids),
+            selected_ids=result.selected_contract_ids,
+            finish_seconds=result.finish_seconds,
             verified=c.feasibility_verified,
             fingerprint=c.problem_sha256,
             master_status=c.system_relaxation_status,
@@ -174,7 +177,6 @@ def main(*, experiment: dict[str, str] | None = None) -> int:
             iterations=c.decomposition_iterations,
             cuts=c.decomposition_learned_cuts,
             oracle_wall=c.decomposition_subproblem_wall_time_seconds,
-            **({"experiment": experiment} if experiment is not None else {}),
         )
         encoded = json.dumps(row, sort_keys=True)
         print(encoded, flush=True)

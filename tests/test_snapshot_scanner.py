@@ -16,7 +16,8 @@ from eve_courier_optimizer.domain import (
     SystemKillActivity,
     ThreatCategory,
 )
-from eve_courier_optimizer.esi import EsiClient, HttpResponse
+from eve_courier_optimizer.esi import EsiClient
+from eve_courier_optimizer.http import HttpResponse
 from eve_courier_optimizer.scanner import scan_public_couriers
 from eve_courier_optimizer.sde import Region, UniverseGraph
 from eve_courier_optimizer.snapshot import ContractSnapshot, read_snapshot, write_snapshot

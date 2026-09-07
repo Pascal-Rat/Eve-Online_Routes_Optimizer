@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from .domain import RouteProblem, SolveResult, isk_units_to_decimal, volume_units_to_decimal
+from .jsonio import write_json
+from .route_policy import security_policy_to_dict
 
 
 def solve_result_to_dict(result: SolveResult, problem: RouteProblem) -> dict[str, Any]:
@@ -100,39 +101,8 @@ def solve_result_to_dict(result: SolveResult, problem: RouteProblem) -> dict[str
             "max_simultaneous_contracts": problem.constraints.max_simultaneous_contracts,
             "seconds_per_jump": problem.constraints.travel.seconds_per_jump,
             "service_seconds": problem.constraints.travel.service_seconds,
-            "minimum_security": problem.constraints.security.minimum_security,
-            "avoided_system_ids": sorted(problem.constraints.security.avoided_system_ids),
-            "allowed_security_bands": (
-                sorted(band.value for band in problem.constraints.security.allowed_bands)
-                if problem.constraints.security.allowed_bands is not None
-                else None
-            ),
-            "gank_avoided_system_ids": sorted(problem.constraints.security.gank_avoided_system_ids),
-            "gank_ship_kill_threshold": problem.constraints.security.gank_ship_kill_threshold,
-            "gank_activity_fetched_at": (
-                problem.constraints.security.gank_activity_fetched_at.isoformat()
-                if problem.constraints.security.gank_activity_fetched_at is not None
-                else None
-            ),
-            "threat_avoided_system_ids": sorted(
-                problem.constraints.security.threat_avoided_system_ids
-            ),
-            "threat_categories": sorted(
-                category.value for category in problem.constraints.security.threat_categories
-            ),
-            "threat_min_events": problem.constraints.security.threat_min_events,
-            "threat_intel_fetched_at": (
-                problem.constraints.security.threat_intel_fetched_at.isoformat()
-                if problem.constraints.security.threat_intel_fetched_at is not None
-                else None
-            ),
-            "threat_window_seconds": problem.constraints.security.threat_window_seconds,
-            "threat_gate_radius_m": problem.constraints.security.threat_gate_radius_m,
-            "threat_coverage_region_ids": sorted(
-                problem.constraints.security.threat_coverage_region_ids
-            ),
-            "threat_incomplete_region_ids": sorted(
-                problem.constraints.security.threat_incomplete_region_ids
+            **security_policy_to_dict(
+                problem.constraints.security, bands_key="allowed_security_bands"
             ),
         },
         "route": [
@@ -171,10 +141,4 @@ def solve_result_to_dict(result: SolveResult, problem: RouteProblem) -> dict[str
 
 
 def write_solve_result(path: Path, result: SolveResult, problem: RouteProblem) -> None:
-    """Atomically write a solve result so readers never observe a partial JSON file."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    json_text = json.dumps(solve_result_to_dict(result, problem), indent=2, sort_keys=True) + "\n"
-    temporary_path = path.with_suffix(path.suffix + ".tmp")
-    temporary_path.write_text(json_text, encoding="utf-8")
-    temporary_path.replace(path)
+    write_json(path, solve_result_to_dict(result, problem))

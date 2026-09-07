@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +15,7 @@ from .domain import (
     ThreatCategory,
     parse_esi_datetime,
 )
+from .jsonio import json_array, json_int, json_string, read_json_object, write_json
 
 SNAPSHOT_SCHEMA_VERSION: Final = 2
 
@@ -154,8 +154,8 @@ def snapshot_to_dict(snapshot: ContractSnapshot) -> dict[str, Any]:
     }
 
 
-def snapshot_from_dict(payload: dict[str, Any]) -> ContractSnapshot:
-    schema_version = payload.get("schema_version")
+def snapshot_from_dict(payload: dict[str, object]) -> ContractSnapshot:
+    schema_version = json_int(payload.get("schema_version"), "snapshot schema_version")
     if schema_version not in {1, SNAPSHOT_SCHEMA_VERSION}:
         raise ValueError(f"unsupported snapshot schema: {payload.get('schema_version')!r}")
     raw_contracts = payload.get("contracts")
@@ -165,7 +165,7 @@ def snapshot_from_dict(payload: dict[str, Any]) -> ContractSnapshot:
     for raw in raw_contracts:
         if not isinstance(raw, dict):
             raise ValueError("snapshot contract must be an object")
-        contracts.append(contract_from_dict(cast(dict[str, Any], raw)))
+        contracts.append(contract_from_dict(cast(dict[str, object], raw)))
     raw_activity = payload.get("system_kill_activity", [])
     if not isinstance(raw_activity, list):
         raise ValueError("snapshot system_kill_activity must be a list")
@@ -173,13 +173,13 @@ def snapshot_from_dict(payload: dict[str, Any]) -> ContractSnapshot:
     for raw in raw_activity:
         if not isinstance(raw, dict):
             raise ValueError("snapshot system-kill activity must be an object")
-        row = cast(dict[str, Any], raw)
+        row = cast(dict[str, object], raw)
         activity.append(
             SystemKillActivity(
-                system_id=int(row["system_id"]),
-                ship_kills=int(row["ship_kills"]),
-                pod_kills=int(row["pod_kills"]),
-                npc_kills=int(row["npc_kills"]),
+                system_id=json_int(row["system_id"], "system_id"),
+                ship_kills=json_int(row["ship_kills"], "ship_kills"),
+                pod_kills=json_int(row["pod_kills"], "pod_kills"),
+                npc_kills=json_int(row["npc_kills"], "npc_kills"),
             )
         )
     raw_activity_time = payload.get("system_kills_fetched_at")
@@ -194,62 +194,82 @@ def snapshot_from_dict(payload: dict[str, Any]) -> ContractSnapshot:
     if raw_threat is not None:
         if not isinstance(raw_threat, dict):
             raise ValueError("snapshot threat_intel must be an object or null")
-        threat = cast(dict[str, Any], raw_threat)
+        threat = cast(dict[str, object], raw_threat)
         if threat.get("source") != "zkillboard":
             raise ValueError("unsupported threat-intel source")
-        threat_time = parse_esi_datetime(str(threat["fetched_at"]))
-        threat_window = int(threat["window_seconds"])
-        threat_radius = int(threat["gate_radius_m"])
+        threat_time = parse_esi_datetime(json_string(threat["fetched_at"], "fetched_at"))
+        threat_window = json_int(threat["window_seconds"], "window_seconds")
+        threat_radius = json_int(threat["gate_radius_m"], "gate_radius_m")
         threat_coverage = tuple(
-            int(value) for value in cast(list[Any], threat.get("coverage_region_ids", []))
+            json_int(value, "array entry")
+            for value in json_array(threat.get("coverage_region_ids", []), "coverage_region_ids")
         )
         threat_incomplete = tuple(
-            int(value) for value in cast(list[Any], threat.get("incomplete_region_ids", []))
+            json_int(value, "array entry")
+            for value in json_array(
+                threat.get("incomplete_region_ids", []), "incomplete_region_ids"
+            )
         )
-        threat_killmails_seen = int(threat.get("killmails_seen", 0))
+        threat_killmails_seen = json_int(threat.get("killmails_seen", 0), "killmails_seen")
         raw_events = threat.get("gate_events", [])
         if not isinstance(raw_events, list):
             raise ValueError("snapshot gate_events must be a list")
         for raw_event in raw_events:
             if not isinstance(raw_event, dict):
                 raise ValueError("snapshot gate-threat event must be an object")
-            event = cast(dict[str, Any], raw_event)
+            event = cast(dict[str, object], raw_event)
             threat_events.append(
                 GateThreatEvent(
-                    killmail_id=int(event["killmail_id"]),
-                    occurred_at=parse_esi_datetime(str(event["occurred_at"])),
-                    system_id=int(event["system_id"]),
-                    region_id=int(event["region_id"]),
-                    gate_id=int(event["gate_id"]),
-                    distance_to_gate_m=int(event["distance_to_gate_m"]),
-                    evidence=GateEvidence(str(event["evidence"])),
-                    categories=frozenset(
-                        ThreatCategory(str(value))
-                        for value in cast(list[Any], event["categories"])
+                    killmail_id=json_int(event["killmail_id"], "killmail_id"),
+                    occurred_at=parse_esi_datetime(
+                        json_string(event["occurred_at"], "occurred_at")
                     ),
-                    victim_ship_type_id=int(event["victim_ship_type_id"]),
+                    system_id=json_int(event["system_id"], "system_id"),
+                    region_id=json_int(event["region_id"], "region_id"),
+                    gate_id=json_int(event["gate_id"], "gate_id"),
+                    distance_to_gate_m=json_int(event["distance_to_gate_m"], "distance_to_gate_m"),
+                    evidence=GateEvidence(json_string(event["evidence"], "evidence")),
+                    categories=frozenset(
+                        ThreatCategory(json_string(value, "array entry"))
+                        for value in json_array(event["categories"], "categories")
+                    ),
+                    victim_ship_type_id=json_int(
+                        event["victim_ship_type_id"], "victim_ship_type_id"
+                    ),
                     attacker_ship_type_ids=tuple(
-                        int(value)
-                        for value in cast(list[Any], event.get("attacker_ship_type_ids", []))
+                        json_int(value, "array entry")
+                        for value in json_array(
+                            event.get("attacker_ship_type_ids", []), "attacker_ship_type_ids"
+                        )
                     ),
                     attacker_weapon_type_ids=tuple(
-                        int(value)
-                        for value in cast(list[Any], event.get("attacker_weapon_type_ids", []))
+                        json_int(value, "array entry")
+                        for value in json_array(
+                            event.get("attacker_weapon_type_ids", []), "attacker_weapon_type_ids"
+                        )
                     ),
-                    player_attacker_count=int(event["player_attacker_count"]),
+                    player_attacker_count=json_int(
+                        event["player_attacker_count"], "player_attacker_count"
+                    ),
                     zkill_labels=tuple(
-                        str(value) for value in cast(list[Any], event.get("zkill_labels", []))
+                        json_string(value, "array entry")
+                        for value in json_array(event.get("zkill_labels", []), "zkill_labels")
                     ),
                 )
             )
     return ContractSnapshot(
-        fetched_at=parse_esi_datetime(str(payload["fetched_at"])),
-        compatibility_date=str(payload["compatibility_date"]),
-        sde_build_number=int(payload["sde_build_number"]),
-        region_ids=tuple(int(value) for value in cast(list[Any], payload["region_ids"])),
+        fetched_at=parse_esi_datetime(json_string(payload["fetched_at"], "fetched_at")),
+        compatibility_date=json_string(payload["compatibility_date"], "compatibility_date"),
+        sde_build_number=json_int(payload["sde_build_number"], "sde_build_number"),
+        region_ids=tuple(
+            json_int(value, "array entry")
+            for value in json_array(payload["region_ids"], "region_ids")
+        ),
         contracts=tuple(contracts),
         system_kills_fetched_at=(
-            parse_esi_datetime(str(raw_activity_time)) if raw_activity_time else None
+            parse_esi_datetime(json_string(raw_activity_time, "system_kills_fetched_at"))
+            if raw_activity_time is not None
+            else None
         ),
         system_kill_activity=tuple(activity),
         threat_intel_fetched_at=threat_time,
@@ -263,31 +283,29 @@ def snapshot_from_dict(payload: dict[str, Any]) -> ContractSnapshot:
 
 
 def write_snapshot(path: Path, snapshot: ContractSnapshot) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    serialized = json.dumps(snapshot_to_dict(snapshot), indent=2, sort_keys=True) + "\n"
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(serialized, encoding="utf-8")
-    temporary.replace(path)
+    write_json(path, snapshot_to_dict(snapshot))
 
 
 def read_snapshot(path: Path) -> ContractSnapshot:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("snapshot root must be an object")
-    return snapshot_from_dict(cast(dict[str, Any], payload))
+    try:
+        return snapshot_from_dict(read_json_object(path))
+    except KeyError as error:
+        raise ValueError(f"{path}: missing required field {error.args[0]!r}") from error
 
 
-def contract_from_dict(row: dict[str, Any]) -> PublicCourierContract:
+def contract_from_dict(row: dict[str, object]) -> PublicCourierContract:
     issued = row.get("date_issued")
     return PublicCourierContract(
-        contract_id=int(row["contract_id"]),
-        origin_location_id=int(row["origin_location_id"]),
-        destination_location_id=int(row["destination_location_id"]),
-        volume_units=int(row["volume_units"]),
-        collateral_units=int(row["collateral_units"]),
-        reward_units=int(row["reward_units"]),
-        date_expired=parse_esi_datetime(str(row["date_expired"])),
-        days_to_complete=int(row["days_to_complete"]),
-        title=str(row.get("title", "")),
-        date_issued=parse_esi_datetime(str(issued)) if issued else None,
+        contract_id=json_int(row["contract_id"], "contract_id"),
+        origin_location_id=json_int(row["origin_location_id"], "origin_location_id"),
+        destination_location_id=json_int(row["destination_location_id"], "destination_location_id"),
+        volume_units=json_int(row["volume_units"], "volume_units"),
+        collateral_units=json_int(row["collateral_units"], "collateral_units"),
+        reward_units=json_int(row["reward_units"], "reward_units"),
+        date_expired=parse_esi_datetime(json_string(row["date_expired"], "date_expired")),
+        days_to_complete=json_int(row["days_to_complete"], "days_to_complete"),
+        title=json_string(row.get("title", ""), "title"),
+        date_issued=parse_esi_datetime(json_string(issued, "date_issued"))
+        if issued is not None
+        else None,
     )

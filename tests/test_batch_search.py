@@ -8,11 +8,13 @@ import pytest
 from ortools.sat.python import cp_model
 
 from eve_courier_optimizer.batch_search import solve_batches
+from eve_courier_optimizer.decomposition import prove_with_decomposition
 from eve_courier_optimizer.domain import ActiveShipment, CollateralMode, TravelTimeModel
 from eve_courier_optimizer.planning import prepare_problem
 from eve_courier_optimizer.reference_solver import solve_reference
 from eve_courier_optimizer.sde import UniverseGraph
-from eve_courier_optimizer.solver import SolverConfig, _run_dense_decomposition, solve_exact
+from eve_courier_optimizer.search_config import SolverConfig
+from eve_courier_optimizer.solver import solve_exact
 from eve_courier_optimizer.verification import simulate_and_verify
 
 from .conftest import make_contract, make_snapshot
@@ -118,7 +120,7 @@ def test_dense_batch_proof_avoids_full_event_model(
     def unexpected(*args: object, **kwargs: object) -> None:
         raise AssertionError("the compact proof should avoid the full event model")
 
-    monkeypatch.setattr("eve_courier_optimizer.solver._build_model", unexpected)
+    monkeypatch.setattr("eve_courier_optimizer.solver.EventModel", unexpected)
     result = solve_exact(p, tiny_graph, config=SolverConfig(minimize_finish_time_after_proof=False))
     assert result.certificate.status.value == "proven_optimal"
     assert result.certificate.decomposition_status == "batch_bound_matched"
@@ -156,13 +158,13 @@ def test_batch_witness_and_ceiling_survive_unknown_master(
     assert answer is not None and answer.upper_bound_units is not None
     partial = replace(answer, complete=False, upper_bound_units=answer.upper_bound_units + 1)
     monkeypatch.setattr(
-        "eve_courier_optimizer.solver.solve_batches", lambda *args, **kwargs: partial
+        "eve_courier_optimizer.decomposition.solve_batches", lambda *args, **kwargs: partial
     )
     monkeypatch.setattr(
-        "eve_courier_optimizer.solver.solve_system_relaxation_master",
+        "eve_courier_optimizer.decomposition.solve_system_relaxation_master",
         lambda *args, **kwargs: SystemRelaxationBound("UNKNOWN", None, None, 0.0, 0, 0, 2),
     )
-    result = _run_dense_decomposition(p, tiny_graph, SolverConfig())
+    result = prove_with_decomposition(p, tiny_graph, SolverConfig())
     assert result.simulation is not None and result.simulation.report.valid
     assert (
         result.relaxation is not None

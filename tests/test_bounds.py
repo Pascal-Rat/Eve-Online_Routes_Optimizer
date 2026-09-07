@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import random
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
+from itertools import permutations
 
 import pytest
 
+from eve_courier_optimizer import bounds
 from eve_courier_optimizer.bounds import build_selection_cuts, solve_system_relaxation
 from eve_courier_optimizer.domain import (
+    ActionKind,
     CollateralMode,
+    PlannedAction,
     PlanningConstraints,
     ProofStatus,
     SecurityPolicy,
@@ -18,7 +22,9 @@ from eve_courier_optimizer.planning import prepare_problem
 from eve_courier_optimizer.reference_solver import solve_reference
 from eve_courier_optimizer.reporting import solve_result_to_dict
 from eve_courier_optimizer.sde import UniverseGraph
-from eve_courier_optimizer.solver import SolverConfig, solve_exact
+from eve_courier_optimizer.search_config import SolverConfig
+from eve_courier_optimizer.solver import solve_exact
+from eve_courier_optimizer.verification import simulate_and_verify
 
 from .conftest import make_contract, make_snapshot
 
@@ -161,7 +167,9 @@ def test_dense_exact_solve_records_and_uses_bound_strengthening(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Exercise the system-master certificate; compact batch certificates have separate coverage.
-    monkeypatch.setattr("eve_courier_optimizer.solver.solve_batches", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "eve_courier_optimizer.decomposition.solve_batches", lambda *args, **kwargs: None
+    )
     contracts = tuple(
         make_contract(now, contract_id, 101, 103, volume=1, collateral=1, reward=100)
         for contract_id in range(1, 21)
@@ -194,3 +202,129 @@ def test_dense_exact_solve_records_and_uses_bound_strengthening(
     payload = solve_result_to_dict(result, prepared.problem)
     assert payload["certificate"]["bound_strengthening"]["system_relaxation_bound_units"] == 2_000
     assert payload["certificate"]["bound_strengthening"]["decomposition_proof_closed"] is True
+
+
+def test_lifted_transform_preserves_every_small_integer_packing() -> None:
+    # Dynamic programming enumerates all multisets fitting each capacity, including exact fits.
+    for capacity in range(2, 21):
+        for threshold in range(1, capacity // 2 + 1):
+            spec = bounds._LiftedResourceWorkSpec(capacity, "volume", threshold)
+            best = [0] * (capacity + 1)
+            for load in range(1, capacity + 1):
+                best[load] = max(best[load - w] + spec.demand(w) for w in range(1, load + 1))
+                assert best[load] <= capacity
+            assert spec.demand(threshold) == threshold
+            assert spec.demand(capacity - threshold) == capacity - threshold
+
+
+def test_lifted_work_tightens_mixed_load_bound(
+    now: datetime, tiny_graph: UniverseGraph, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prepared = prepare_problem(
+        make_snapshot(
+            now,
+            *(
+                make_contract(now, i, 101, 103, volume=w, reward=100)
+                for i, w in enumerate((75, 40, 40), 1)
+            ),
+        ),
+        tiny_graph,
+        replace(constraints(now, horizon=70), travel=TravelTimeModel(10, 0)),
+    )
+    specs = bounds._resource_work_specs
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            bounds,
+            "_resource_work_specs",
+            lambda p: [s for s in specs(p) if not isinstance(s, bounds._LiftedResourceWorkSpec)],
+        )
+        old = bounds.solve_system_relaxation(
+            prepared, max_time_seconds=2, selection_cuts=bounds.SelectionCuts((), ())
+        )
+    new = bounds.solve_system_relaxation(
+        prepared, max_time_seconds=2, selection_cuts=bounds.SelectionCuts((), ())
+    )
+    assert old.upper_bound_units == 300
+    assert new.upper_bound_units == solve_reference(prepared).objective_units == 200
+
+
+@pytest.mark.parametrize(
+    "mode, expiry_hours, incompatible",
+    [
+        (CollateralMode.LOCKED, 72, True),
+        (CollateralMode.ROLLING, 1, True),
+        (CollateralMode.ROLLING, 72, False),
+    ],
+)
+def test_pair_projection_respects_absolute_and_rolling_deadlines(
+    now: datetime,
+    tiny_graph: UniverseGraph,
+    mode: CollateralMode,
+    expiry_hours: int,
+    incompatible: bool,
+) -> None:
+    prepared = prepare_problem(
+        make_snapshot(
+            now,
+            *(
+                make_contract(now, i, 101, 103, volume=60, expiry_hours=expiry_hours)
+                for i in (1, 2)
+            ),
+        ),
+        tiny_graph,
+        replace(constraints(now, horizon=180_000, mode=mode), travel=TravelTimeModel(20_000, 100)),
+    )
+    assert len(prepared.problem.contracts) == 2
+    cuts = bounds.build_selection_cuts(prepared)
+    assert bool(cuts.pairs) is incompatible
+    # Independently enumerate every event ordering, with the verifier handling time semantics.
+    actions = tuple(PlannedAction(action, i) for i in (1, 2) for action in ActionKind)
+    feasible = any(
+        simulate_and_verify(prepared.problem, tiny_graph, order, (1, 2)).report.valid
+        for order in permutations(actions)
+    )
+    assert feasible is not incompatible
+
+
+def test_pair_projection_expiry_is_strict_but_completion_deadline_is_inclusive(
+    now: datetime, tiny_graph: UniverseGraph
+) -> None:
+    # One-parcel capacity forces the second pickup to occur after the first complete loop.
+    jobs = tuple(make_contract(now, i, 101, 103, volume=60) for i in (1, 2))
+    c = replace(
+        constraints(now, horizon=100, mode=CollateralMode.ROLLING), travel=TravelTimeModel(10, 1)
+    )
+    for expiry, cut in ((42, True), (43, False)):
+        prepared = prepare_problem(
+            make_snapshot(
+                now, *(replace(job, date_expired=now + timedelta(seconds=expiry)) for job in jobs)
+            ),
+            tiny_graph,
+            c,
+        )
+        assert bool(bounds.build_selection_cuts(prepared).pairs) is cut
+    # Together both jobs finish exactly at their locked deadline; rejecting equality is unsound.
+    prepared = prepare_problem(
+        make_snapshot(now, *(replace(job, volume_units=40) for job in jobs)),
+        tiny_graph,
+        replace(
+            c,
+            horizon_seconds=172800,
+            collateral_mode=CollateralMode.LOCKED,
+            travel=TravelTimeModel(43000, 100),
+        ),
+    )
+    assert bounds.build_selection_cuts(prepared).pairs == ()
+
+
+def test_master_must_allow_pickup_delivery_system_revisits(
+    now: datetime, tiny_graph: UniverseGraph
+) -> None:
+    prepared = prepare_problem(
+        make_snapshot(now, make_contract(now, 1, 101, 103), make_contract(now, 2, 103, 101)),
+        tiny_graph,
+        constraints(now, horizon=50),
+    )
+    assert bounds.build_selection_cuts(prepared).pairs == ()
+    assert bounds.solve_system_relaxation(prepared, max_time_seconds=2).upper_bound_units == 1000
+    assert solve_reference(prepared).objective_units == 1000

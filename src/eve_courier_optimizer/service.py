@@ -3,19 +3,31 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 
-from .domain import ActionKind, ActiveShipment, PlanningConstraints, SolveResult, TravelLegKind
+from .domain import (
+    ActiveShipment,
+    PlanningConstraints,
+    SolveResult,
+    planned_visits,
+)
 from .esi import EsiClient
 from .execution import ExecutionState, constraints_for_replan, initial_execution_state
 from .planning import PreparedProblem, prepare_problem
 from .scanner import DEFAULT_CONTRACT_SCAN_WORKERS, scan_public_couriers
 from .sde import UniverseGraph
+from .search_config import SolverConfig
 from .snapshot import ContractSnapshot
-from .solver import SolverConfig, solve_exact
+from .solver import solve_exact
 from .threat_intel import DEFAULT_GATE_RADIUS_M, DEFAULT_THREAT_WINDOW_SECONDS, ZkillClient
-from .verification import PlannedAction, PlannedVisit, PlannedWaypoint, simulate_and_verify
+from .verification import simulate_and_verify
+
+
+@dataclass(frozen=True, slots=True)
+class RoutePlan:
+    prepared: PreparedProblem
+    result: SolveResult
 
 
 class PlannerService:
@@ -93,7 +105,7 @@ class PlannerService:
         excluded_contract_ids: frozenset[int] = frozenset(),
         max_candidates: int | None = None,
         solver_config: SolverConfig | None = None,
-    ) -> tuple[PreparedProblem, SolveResult]:
+    ) -> RoutePlan:
         """Prepare and solve a fresh route, returning both the auditable input and result."""
 
         prepared_problem = self.prepare(
@@ -103,12 +115,13 @@ class PlannerService:
             excluded_contract_ids=excluded_contract_ids,
             max_candidates=max_candidates,
         )
-        return prepared_problem, solve_exact(
+        result = solve_exact(
             prepared_problem,
             self.graph,
             config=solver_config,
             progress=self.progress,
         )
+        return RoutePlan(prepared_problem, result)
 
     def replan(
         self,
@@ -118,7 +131,7 @@ class PlannerService:
         max_candidates: int | None = None,
         solver_config: SolverConfig | None = None,
         at: datetime | None = None,
-    ) -> tuple[PreparedProblem, SolveResult]:
+    ) -> RoutePlan:
         """Solve again from live execution state while preserving accepted commitments."""
 
         replanning_constraints = constraints_for_replan(state, snapshot, at=at)
@@ -133,14 +146,14 @@ class PlannerService:
 
     def arm(
         self,
-        prepared: PreparedProblem,
-        result: SolveResult,
+        plan: RoutePlan,
         *,
         at: datetime,
         previous: ExecutionState | None = None,
     ) -> ExecutionState:
         """Recheck the proposed itinerary at departure before accepting it as live state."""
 
+        prepared, result = plan.prepared, plan.result
         if not result.certificate.feasibility_verified:
             raise ValueError("the plan has no independently verified feasible route")
         constraints = prepared.problem.constraints
@@ -153,22 +166,14 @@ class PlannerService:
             horizon = int((previous.session_deadline - at).total_seconds())
         selected = set(result.selected_contract_ids)
         if any(
-            c.contract.contract_id in selected and c.contract.date_expired <= at
-            for c in prepared.problem.contracts
+            c.contract_id in selected and c.date_expired <= at for c in prepared.problem.contracts
         ):
             raise ValueError("a selected listing has expired; refresh and solve before arming")
         constraints = replace(constraints, snapshot_time=at, horizon_seconds=horizon)
-        visits: list[PlannedVisit] = []
-        for leg in result.travel_legs:
-            if leg.kind is TravelLegKind.WAYPOINT:
-                visits.append(PlannedWaypoint(leg.to_system_id))
-            elif leg.kind in {TravelLegKind.PICKUP, TravelLegKind.DELIVERY}:
-                assert leg.contract_id is not None
-                visits.append(PlannedAction(ActionKind(leg.kind.value), leg.contract_id))
         replay = simulate_and_verify(
             replace(prepared.problem, constraints=constraints),
             self.graph,
-            tuple(visits),
+            planned_visits(result.travel_legs),
             result.selected_contract_ids,
         )
         if not replay.report.valid:

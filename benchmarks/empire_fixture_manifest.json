@@ -1,0 +1,30 @@
+{
+  "fixture": "empire_snapshot_2026-08-06.json",
+  "fixture_sha256": "5dd616c9352e6256eda76ee4894131c71b9d5f330511f9a0b6d3635dfead5061",
+  "fixture_version": 1,
+  "observation": {
+    "compatibility_date": "2026-08-05",
+    "fetched_at": "2026-08-06T16:58:14.183415+00:00",
+    "gate_threat_events": 250,
+    "public_couriers_empire": 421,
+    "region_scope": "NPC Empire high+low",
+    "regions": 24,
+    "threat_coverage_regions": 24,
+    "threat_gate_radius_m": 250000,
+    "threat_window_seconds": 7200
+  },
+  "sde_revalidation": {
+    "captured_with_build": 3457062,
+    "normalized_to_build": 3458726,
+    "normal_stargates_identical": 13978,
+    "npc_station_mappings_identical": 5210,
+    "solar_systems_identical": 8490,
+    "stargate_adjacency_identical": 8490
+  },
+  "routing_data": {
+    "file": "empire_sde_3458726.sqlite3.gz",
+    "sde_build": 3458726,
+    "sha256": "266583ac82d7058a094201682dc1f5d9b269cbd980661cc748d2c0fa14d5b2b2",
+    "note": "Pinned independently from the application SDE to keep benchmark routing inputs stable."
+  }
+}

@@ -1,4 +1,4 @@
-"""Iteration 1: public-contract scanning into reproducible snapshots."""
+"""Capture public courier observations with explicit regional scope."""
 
 from __future__ import annotations
 

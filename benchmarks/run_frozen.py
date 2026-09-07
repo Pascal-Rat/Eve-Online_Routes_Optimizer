@@ -27,8 +27,9 @@ from eve_courier_optimizer.domain import (
 )
 from eve_courier_optimizer.planning import prepare_problem
 from eve_courier_optimizer.sde import Region, SdeMetadata, SolarSystem, UniverseGraph
+from eve_courier_optimizer.search_config import SolverConfig
 from eve_courier_optimizer.snapshot import ContractSnapshot
-from eve_courier_optimizer.solver import SolverConfig, solve_exact
+from eve_courier_optimizer.solver import solve_exact
 from eve_courier_optimizer.threat_intel import threat_avoided_systems
 
 FIXTURE = Path(__file__).with_name("frozen_universe.json")
@@ -112,9 +113,7 @@ def _snapshot(payload: dict[str, Any]) -> ContractSnapshot:
                 origin_location_id=1_000 + int(origin),
                 destination_location_id=1_000 + int(destination),
                 volume_units=cargo_capacity_to_units(str(volume_m3)),
-                collateral_units=isk_to_units(
-                    Decimal(str(collateral_b)) * Decimal("1000000000")
-                ),
+                collateral_units=isk_to_units(Decimal(str(collateral_b)) * Decimal("1000000000")),
                 reward_units=isk_to_units(Decimal(str(reward_m)) * Decimal("1000000")),
                 date_expired=fetched_at + timedelta(days=1),
                 days_to_complete=1,
@@ -158,8 +157,7 @@ def run_benchmark_scenarios(*, time_limit_seconds: float = 15.0) -> tuple[Benchm
             start_system_id=1,
             cargo_capacity_units=cargo_capacity_to_units(str(raw_scenario["cargo_m3"])),
             collateral_budget_units=isk_to_units(
-                Decimal(str(raw_scenario["collateral_billion_isk"]))
-                * Decimal("1000000000")
+                Decimal(str(raw_scenario["collateral_billion_isk"])) * Decimal("1000000000")
             ),
             horizon_seconds=3_600,
             snapshot_time=snapshot.fetched_at,

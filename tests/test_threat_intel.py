@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from eve_courier_optimizer.domain import GateEvidence, ThreatCategory
-from eve_courier_optimizer.esi import EsiResponseCache, HttpResponse
+from eve_courier_optimizer.http import HttpResponse, ResponseCache
 from eve_courier_optimizer.sde import (
     Region,
     SdeMetadata,
@@ -161,7 +161,7 @@ def test_zkill_client_honors_gzip_cache_user_agent_and_input_bounds(tmp_path: Pa
     clock = [1_000.0]
     client = ZkillClient(
         transport=transport,
-        cache=EsiResponseCache(tmp_path / "zkill.sqlite3"),
+        cache=ResponseCache(tmp_path / "zkill.sqlite3"),
         now=lambda: clock[0],
         sleep=lambda _seconds: None,
     )
@@ -222,9 +222,7 @@ def test_zkill_client_retries_transient_errors_and_rejects_bad_responses() -> No
         wrong_shape.region_losses(10)
 
     invalid_gzip = ZkillClient(
-        transport=SequenceTransport(
-            [HttpResponse(200, {"content-encoding": "gzip"}, b"not gzip")]
-        ),
+        transport=SequenceTransport([HttpResponse(200, {"content-encoding": "gzip"}, b"not gzip")]),
         request_spacing_seconds=0,
     )
     with pytest.raises(ZkillError, match="invalid gzip"):
@@ -271,12 +269,15 @@ def test_collection_records_partial_coverage_and_system_thresholds(
     selected = frozenset({ThreatCategory.SMARTBOMB, ThreatCategory.GATE_CAMP})
     assert threat_avoided_systems((first,), selected, minimum_events=2) == frozenset()
     assert threat_avoided_systems((first, second), selected, minimum_events=2) == frozenset({1})
-    assert threat_avoided_systems(
-        (first, second),
-        selected,
-        minimum_events=1,
-        exempt_system_ids=frozenset({1}),
-    ) == frozenset()
+    assert (
+        threat_avoided_systems(
+            (first, second),
+            selected,
+            minimum_events=1,
+            exempt_system_ids=frozenset({1}),
+        )
+        == frozenset()
+    )
     with pytest.raises(ValueError, match="select at least one"):
         threat_avoided_systems((first,), frozenset(), minimum_events=1)
     with pytest.raises(ValueError, match="must be positive"):

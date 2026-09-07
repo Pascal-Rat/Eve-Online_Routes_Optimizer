@@ -50,7 +50,7 @@ def test_prepare_problem_applies_declared_and_safe_filters(
 
     prepared = prepare_problem(snapshot, tiny_graph, constraints(now))
 
-    assert [item.contract.contract_id for item in prepared.problem.contracts] == [1]
+    assert [item.contract_id for item in prepared.problem.contracts] == [1]
     assert dict(prepared.problem.scope.policy_exclusions) == {
         "security_policy": 1,
         "unsupported_non_npc_station_endpoint": 1,
@@ -74,7 +74,7 @@ def test_candidate_cap_marks_proof_scope_as_truncated(
     prepared = prepare_problem(snapshot, tiny_graph, constraints(now), max_candidates=1)
     assert not prepared.problem.scope.is_untruncated
     assert dict(prepared.problem.scope.heuristic_reductions) == {"candidate_cap": 1}
-    assert prepared.problem.contracts[0].contract.contract_id == 2
+    assert prepared.problem.contracts[0].contract_id == 2
 
 
 def test_active_contract_still_visible_in_snapshot_is_not_double_counted(
@@ -82,7 +82,7 @@ def test_active_contract_still_visible_in_snapshot_is_not_double_counted(
     tiny_graph: UniverseGraph,
 ) -> None:
     public = make_contract(now, 1, 101, 102, reward=500)
-    active = ActiveShipment(RoutableContract(public, 1, 2), deadline=public.date_expired)
+    active = ActiveShipment(RoutableContract.resolve(public, 1, 2), deadline=public.date_expired)
 
     prepared = prepare_problem(
         make_snapshot(now, public),
@@ -104,7 +104,7 @@ def test_solo_ranking_prefers_reward_rate(now: datetime, tiny_graph: UniverseGra
     )
     prepared = prepare_problem(snapshot, tiny_graph, constraints(now))
     ranking = rank_single_contracts(prepared)
-    assert ranking[0].contract.contract.contract_id == 2
+    assert ranking[0].contract.contract_id == 2
 
 
 def test_snapshot_sde_mismatch_blocks_proof(now: datetime, tiny_graph: UniverseGraph) -> None:
@@ -255,6 +255,6 @@ def test_rolling_mode_treats_exact_expiry_as_too_late(
         ),
     )
     assert not prepared.problem.contracts
-    assert dict(prepared.problem.scope.safe_reductions)[
-        "solo_lower_bound_misses_listing_expiry"
-    ] == 1
+    assert (
+        dict(prepared.problem.scope.safe_reductions)["solo_lower_bound_misses_listing_expiry"] == 1
+    )

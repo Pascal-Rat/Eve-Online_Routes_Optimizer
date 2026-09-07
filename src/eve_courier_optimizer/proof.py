@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from .domain import RouteProblem
+from .route_policy import security_policy_to_dict
 
 
 def canonical_problem_sha256(
@@ -29,74 +30,39 @@ def canonical_problem_sha256(
             "max_simultaneous_contracts": constraints.max_simultaneous_contracts,
             "seconds_per_jump": constraints.travel.seconds_per_jump,
             "service_seconds": constraints.travel.service_seconds,
-            "minimum_security": constraints.security.minimum_security,
-            "avoided_system_ids": sorted(constraints.security.avoided_system_ids),
-            "allowed_security_bands": (
-                sorted(band.value for band in constraints.security.allowed_bands)
-                if constraints.security.allowed_bands is not None
-                else None
-            ),
-            "gank_avoided_system_ids": sorted(
-                constraints.security.gank_avoided_system_ids
-            ),
-            "gank_ship_kill_threshold": constraints.security.gank_ship_kill_threshold,
-            "gank_activity_fetched_at": (
-                constraints.security.gank_activity_fetched_at.isoformat()
-                if constraints.security.gank_activity_fetched_at is not None
-                else None
-            ),
-            "threat_avoided_system_ids": sorted(
-                constraints.security.threat_avoided_system_ids
-            ),
-            "threat_categories": sorted(
-                category.value for category in constraints.security.threat_categories
-            ),
-            "threat_min_events": constraints.security.threat_min_events,
-            "threat_intel_fetched_at": (
-                constraints.security.threat_intel_fetched_at.isoformat()
-                if constraints.security.threat_intel_fetched_at is not None
-                else None
-            ),
-            "threat_window_seconds": constraints.security.threat_window_seconds,
-            "threat_gate_radius_m": constraints.security.threat_gate_radius_m,
-            "threat_coverage_region_ids": sorted(
-                constraints.security.threat_coverage_region_ids
-            ),
-            "threat_incomplete_region_ids": sorted(
-                constraints.security.threat_incomplete_region_ids
-            ),
+            **security_policy_to_dict(constraints.security, bands_key="allowed_security_bands"),
         },
         "contracts": [
+            {
+                "id": item.contract_id,
+                "origin_location": item.origin_location_id,
+                "destination_location": item.destination_location_id,
+                "origin_system": item.origin_system_id,
+                "destination_system": item.destination_system_id,
+                "volume": item.volume_units,
+                "collateral": item.collateral_units,
+                "reward": item.reward_units,
+                "expires": item.date_expired.isoformat(),
+                "days": item.days_to_complete,
+            }
+            for item in sorted(problem.contracts, key=lambda item: item.contract_id)
+        ],
+        "active_shipments": [
             {
                 "id": item.contract.contract_id,
                 "origin_location": item.contract.origin_location_id,
                 "destination_location": item.contract.destination_location_id,
-                "origin_system": item.origin_system_id,
-                "destination_system": item.destination_system_id,
+                "origin_system": item.contract.origin_system_id,
+                "destination_system": item.contract.destination_system_id,
                 "volume": item.contract.volume_units,
                 "collateral": item.contract.collateral_units,
                 "reward": item.contract.reward_units,
-                "expires": item.contract.date_expired.isoformat(),
-                "days": item.contract.days_to_complete,
-            }
-            for item in sorted(problem.contracts, key=lambda item: item.contract.contract_id)
-        ],
-        "active_shipments": [
-            {
-                "id": item.contract.contract.contract_id,
-                "origin_location": item.contract.contract.origin_location_id,
-                "destination_location": item.contract.contract.destination_location_id,
-                "origin_system": item.contract.origin_system_id,
-                "destination_system": item.contract.destination_system_id,
-                "volume": item.contract.contract.volume_units,
-                "collateral": item.contract.contract.collateral_units,
-                "reward": item.contract.contract.reward_units,
                 "deadline": item.deadline.isoformat(),
                 "picked": item.picked,
             }
             for item in sorted(
                 problem.active_shipments,
-                key=lambda item: item.contract.contract.contract_id,
+                key=lambda item: item.contract.contract_id,
             )
         ],
         "scope": {

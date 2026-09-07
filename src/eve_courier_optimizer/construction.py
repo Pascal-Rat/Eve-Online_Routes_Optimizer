@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
-from .domain import ActionKind, CollateralMode
-from .planning import PreparedProblem, SingleContractScore
-from .sde import UniverseGraph
-from .verification import (
+import time
+from collections.abc import Mapping
+from dataclasses import replace
+from itertools import combinations
+
+from .domain import (
+    ActionKind,
+    CollateralMode,
     PlannedAction,
     PlannedVisit,
     PlannedWaypoint,
-    SimulationResult,
-    simulate_and_verify,
+    RoutableContract,
 )
+from .planning import PreparedProblem, SingleContractScore
+from .sde import UniverseGraph
+from .verification import SimulationResult, VerifiedRoute, simulate_and_verify
 
 
 def insert_additional_contracts(
@@ -32,7 +38,7 @@ def insert_additional_contracts(
     if not simulation.report.valid or prepared.problem.active_shipments:
         return visits, simulation
     c = prepared.problem.constraints
-    contracts = {item.contract.contract_id: item for item in prepared.problem.contracts}
+    contracts = {contract.contract_id: contract for contract in prepared.problem.contracts}
     selected = {visit.contract_id for visit in visits if isinstance(visit, PlannedAction)}
     candidates = (
         candidate_order
@@ -41,8 +47,8 @@ def insert_additional_contracts(
             prepared.scores,
             key=lambda score: (
                 score.reward_per_hour_isk,
-                score.contract.contract.reward_units,
-                -score.contract.contract.contract_id,
+                score.contract.reward_units,
+                -score.contract.contract_id,
             ),
             reverse=True,
         )
@@ -56,15 +62,13 @@ def insert_additional_contracts(
         return c.horizon_seconds + 1 if jumps is None else jumps * c.travel.seconds_per_jump
 
     for score in candidates:
-        item = score.contract
-        contract = item.contract
+        contract = score.contract
         if contract.contract_id in selected:
             continue
         if simulation.finish_seconds + 2 * c.travel.service_seconds > c.horizon_seconds:
             break
         if c.collateral_mode is CollateralMode.LOCKED and (
-            sum(contracts[i].contract.collateral_units for i in selected)
-            + contract.collateral_units
+            sum(contracts[i].collateral_units for i in selected) + contract.collateral_units
             > c.collateral_budget_units
         ):
             continue
@@ -79,16 +83,16 @@ def insert_additional_contracts(
                 systems.append(
                     existing.origin_system_id if pickup else existing.destination_system_id
                 )
-                load += sign * existing.contract.volume_units
+                load += sign * existing.volume_units
                 count += sign
-                locked += sign * existing.contract.collateral_units
+                locked += sign * existing.collateral_units
             else:
                 systems.append(visit.system_id)
             cargo.append(load)
             parcels.append(count)
             collateral.append(locked)
         endpoints: list[int | None] = [*systems[1:], c.terminal_system_id]
-        origin, destination = item.origin_system_id, item.destination_system_id
+        origin, destination = contract.origin_system_id, contract.destination_system_id
         options: list[tuple[int, int, int]] = []
         for pickup_slot in range(len(systems)):
             max_cargo = max_parcels = max_collateral = 0
@@ -147,6 +151,61 @@ def insert_additional_contracts(
     return visits, simulation
 
 
+def _insertion_orders(prepared: PreparedProblem) -> tuple[tuple[SingleContractScore, ...], ...]:
+    return (
+        tuple(
+            sorted(
+                prepared.scores,
+                key=lambda s: (
+                    -s.reward_per_hour_isk,
+                    -s.contract.reward_units,
+                    s.contract.contract_id,
+                ),
+            )
+        ),
+        tuple(
+            sorted(
+                prepared.scores,
+                key=lambda s: (
+                    -s.contract.reward_units,
+                    s.contract.contract_id,
+                ),
+            )
+        ),
+        tuple(
+            sorted(
+                prepared.scores,
+                key=lambda s: (
+                    -s.contract.reward_units / max(1, s.contract.collateral_units),
+                    s.contract.contract_id,
+                ),
+            )
+        ),
+    )
+
+
+def _remove_contract_visits(
+    visits: tuple[PlannedVisit, ...],
+    removed: frozenset[int],
+    contracts: Mapping[int, RoutableContract],
+    required_system_ids: frozenset[int],
+) -> tuple[PlannedVisit, ...]:
+    remaining: list[PlannedVisit] = []
+    for visit in visits:
+        if isinstance(visit, PlannedAction) and visit.contract_id in removed:
+            contract = contracts[visit.contract_id]
+            system = (
+                contract.origin_system_id
+                if visit.action is ActionKind.PICKUP
+                else contract.destination_system_id
+            )
+            if system in required_system_ids:
+                remaining.append(PlannedWaypoint(system))
+        else:
+            remaining.append(visit)
+    return tuple(remaining)
+
+
 def improve_incumbent(
     prepared: PreparedProblem,
     graph: UniverseGraph,
@@ -169,37 +228,7 @@ def improve_incumbent(
     restart_simulation = simulate_and_verify(prepared.problem, graph, restart_visits, ())
     if not restart_simulation.report.valid:
         return best
-    orders = (
-        tuple(
-            sorted(
-                prepared.scores,
-                key=lambda s: (
-                    -s.reward_per_hour_isk,
-                    -s.contract.contract.reward_units,
-                    s.contract.contract.contract_id,
-                ),
-            )
-        ),
-        tuple(
-            sorted(
-                prepared.scores,
-                key=lambda s: (
-                    -s.contract.contract.reward_units,
-                    s.contract.contract.contract_id,
-                ),
-            )
-        ),
-        tuple(
-            sorted(
-                prepared.scores,
-                key=lambda s: (
-                    -s.contract.contract.reward_units
-                    / max(1, s.contract.contract.collateral_units),
-                    s.contract.contract.contract_id,
-                ),
-            )
-        ),
-    )
+    orders = _insertion_orders(prepared)
 
     def quality(result: tuple[tuple[PlannedVisit, ...], SimulationResult]) -> tuple[int, int]:
         return result[1].total_reward_units, -result[1].finish_seconds
@@ -216,25 +245,18 @@ def improve_incumbent(
             best = candidate
     seed_visits = best[0]
     selected = {v.contract_id for v in seed_visits if isinstance(v, PlannedAction)}
-    items = {i.contract.contract_id: i for i in prepared.problem.contracts}
+    items = {i.contract_id: i for i in prepared.problem.contracts}
     for removed in sorted(selected):
-        reduced: list[PlannedVisit] = []
-        for visit in seed_visits:
-            if isinstance(visit, PlannedAction) and visit.contract_id == removed:
-                item = items[removed]
-                system = (
-                    item.origin_system_id
-                    if visit.action is ActionKind.PICKUP
-                    else item.destination_system_id
-                )
-                if system in prepared.problem.constraints.required_system_ids:
-                    reduced.append(PlannedWaypoint(system))
-            else:
-                reduced.append(visit)
+        reduced = _remove_contract_visits(
+            seed_visits,
+            frozenset({removed}),
+            items,
+            prepared.problem.constraints.required_system_ids,
+        )
         sim = simulate_and_verify(
             prepared.problem,
             graph,
-            tuple(reduced),
+            reduced,
             tuple(sorted(selected - {removed})),
         )
         if not sim.report.valid:
@@ -243,10 +265,275 @@ def improve_incumbent(
             candidate = insert_additional_contracts(
                 prepared,
                 graph,
-                tuple(reduced),
+                reduced,
                 sim,
                 candidate_order=order,
             )
             if quality(candidate) > quality(best):
                 best = candidate
+    return best
+
+
+def build_greedy_route_hint(prepared: PreparedProblem) -> tuple[PlannedVisit, ...]:
+    """Build a deterministic sequential route with a feasible required-system tail.
+
+    Hints never constrain the model. This conservative constructor selects only jobs it can visit
+    pickup-then-delivery without interleaving while still reserving a concrete path through every
+    remaining required system and the terminal. CP-SAT remains free to improve it or ignore it.
+    """
+
+    problem = prepared.problem
+    if problem.active_shipments:
+        return ()
+    constraints = problem.constraints
+    current_system_id = constraints.start_system_id
+    elapsed_seconds = 0
+    locked_collateral_units = 0
+    visits: list[PlannedVisit] = []
+    contracts_by_score = sorted(
+        prepared.scores,
+        key=lambda score: (
+            score.reward_per_hour_isk,
+            score.contract.reward_units,
+            -score.contract.contract_id,
+        ),
+        reverse=True,
+    )
+    service_time_seconds = constraints.travel.service_seconds
+    seconds_per_jump = constraints.travel.seconds_per_jump
+    required_system_ids = set(constraints.required_system_ids)
+    required_system_ids.discard(constraints.start_system_id)
+    visited_required_system_ids: set[int] = set()
+
+    def finish_required_route_seconds(
+        starting_system_id: int,
+        starting_elapsed_seconds: int,
+        already_visited_system_ids: set[int],
+    ) -> int | None:
+        """Return one deterministic feasible waypoint/terminal tail completion time."""
+
+        current_system_id = starting_system_id
+        completion_seconds = starting_elapsed_seconds
+        remaining_required_system_ids = required_system_ids - already_visited_system_ids
+        terminal_system_id = constraints.terminal_system_id
+        if terminal_system_id is not None:
+            remaining_required_system_ids.discard(terminal_system_id)
+        while remaining_required_system_ids:
+            reachable_required_systems = [
+                (jump_count, candidate_system_id)
+                for candidate_system_id in remaining_required_system_ids
+                if (
+                    jump_count := prepared.jump_matrix.get((current_system_id, candidate_system_id))
+                )
+                is not None
+            ]
+            if not reachable_required_systems:
+                return None
+            jump_count, destination_system_id = min(reachable_required_systems)
+            completion_seconds += jump_count * seconds_per_jump
+            current_system_id = destination_system_id
+            remaining_required_system_ids.remove(destination_system_id)
+        if terminal_system_id is not None:
+            jump_count = prepared.jump_matrix.get((current_system_id, terminal_system_id))
+            if jump_count is None:
+                return None
+            completion_seconds += jump_count * seconds_per_jump
+        return completion_seconds
+
+    for score in contracts_by_score:
+        contract = score.contract
+        jumps_to_pickup = prepared.jump_matrix.get((current_system_id, contract.origin_system_id))
+        delivery_jumps = prepared.jump_matrix.get(
+            (contract.origin_system_id, contract.destination_system_id)
+        )
+        if jumps_to_pickup is None or delivery_jumps is None:
+            continue
+        pickup_arrival_seconds = elapsed_seconds + jumps_to_pickup * seconds_per_jump
+        delivery_arrival_seconds = (
+            pickup_arrival_seconds + service_time_seconds + delivery_jumps * seconds_per_jump
+        )
+        delivery_completion_seconds = delivery_arrival_seconds + service_time_seconds
+        if delivery_completion_seconds > constraints.horizon_seconds:
+            continue
+        newly_visited_required_system_ids = visited_required_system_ids | (
+            {contract.origin_system_id, contract.destination_system_id} & required_system_ids
+        )
+        route_finish_seconds = finish_required_route_seconds(
+            contract.destination_system_id,
+            delivery_completion_seconds,
+            newly_visited_required_system_ids,
+        )
+        if route_finish_seconds is None or route_finish_seconds > constraints.horizon_seconds:
+            continue
+        if constraints.collateral_mode is CollateralMode.LOCKED:
+            if (
+                locked_collateral_units + contract.collateral_units
+                > constraints.collateral_budget_units
+            ):
+                continue
+            if delivery_completion_seconds > contract.days_to_complete * 86_400:
+                continue
+        else:
+            if pickup_arrival_seconds > contract.last_pickup_second(constraints.snapshot_time):
+                continue
+            if (
+                delivery_completion_seconds
+                > pickup_arrival_seconds + contract.days_to_complete * 86_400
+            ):
+                continue
+        visits.extend(
+            (
+                PlannedAction(ActionKind.PICKUP, contract.contract_id),
+                PlannedAction(ActionKind.DELIVERY, contract.contract_id),
+            )
+        )
+        if constraints.collateral_mode is CollateralMode.LOCKED:
+            locked_collateral_units += contract.collateral_units
+        elapsed_seconds = delivery_completion_seconds
+        current_system_id = contract.destination_system_id
+        visited_required_system_ids = newly_visited_required_system_ids
+    remaining = required_system_ids - visited_required_system_ids
+    if constraints.terminal_system_id is not None:
+        remaining.discard(constraints.terminal_system_id)
+    while remaining:
+        choices = [
+            (jumps, system)
+            for system in remaining
+            if (jumps := prepared.jump_matrix.get((current_system_id, system))) is not None
+        ]
+        if not choices:
+            return ()
+        _, current_system_id = min(choices)
+        visits.append(PlannedWaypoint(current_system_id))
+        remaining.remove(current_system_id)
+    return tuple(visits)
+
+
+def construct_incumbent(prepared: PreparedProblem, graph: UniverseGraph) -> VerifiedRoute | None:
+    optional_ids = {contract.contract_id for contract in prepared.problem.contracts}
+    visits = build_greedy_route_hint(prepared)
+    if prepared.problem.active_shipments:
+        actions: list[PlannedVisit] = []
+        for shipment in sorted(
+            prepared.problem.active_shipments,
+            key=lambda shipment: (
+                not shipment.picked,
+                shipment.deadline,
+                shipment.contract.contract_id,
+            ),
+        ):
+            if not shipment.picked:
+                actions.append(PlannedAction(ActionKind.PICKUP, shipment.contract.contract_id))
+            actions.append(PlannedAction(ActionKind.DELIVERY, shipment.contract.contract_id))
+        actions.extend(
+            PlannedWaypoint(system)
+            for system in sorted(prepared.problem.constraints.required_system_ids)
+        )
+        visits = tuple(actions)
+    ids = tuple(
+        sorted(
+            {
+                visit.contract_id
+                for visit in visits
+                if isinstance(visit, PlannedAction) and visit.contract_id in optional_ids
+            }
+        )
+    )
+    simulation = simulate_and_verify(prepared.problem, graph, visits, ids)
+    mandatory_only = replace(prepared, problem=replace(prepared.problem, contracts=()), scores=())
+    visits, simulation = improve_incumbent(
+        prepared, graph, visits, simulation, restart_visits=build_greedy_route_hint(mandatory_only)
+    )
+    if not simulation.report.valid:
+        return None
+    ids = tuple(
+        sorted(
+            {
+                visit.contract_id
+                for visit in visits
+                if isinstance(visit, PlannedAction) and visit.contract_id in optional_ids
+            }
+        )
+    )
+    return VerifiedRoute(ids, simulation)
+
+
+def diversify_incumbent(
+    prepared: PreparedProblem,
+    graph: UniverseGraph,
+    incumbent: VerifiedRoute,
+    *,
+    reward_ceiling: int | None,
+    time_budget_seconds: float,
+) -> VerifiedRoute:
+    """Explore different haul lanes and two-job replacements after bounded exact search.
+
+    Only an unproven result with a master bound pays this cost. Every candidate is independently
+    replayed; the neighborhood improves the final route, never eligibility or the rigorous ceiling.
+    The soft budget is checked between insertion passes, not inside the route verifier.
+    """
+    if prepared.problem.active_shipments or time_budget_seconds <= 0:
+        return incumbent
+    deadline = time.perf_counter() + time_budget_seconds
+    orders = _insertion_orders(prepared)[:2]
+    best = incumbent
+
+    def finished() -> bool:
+        return (
+            best.simulation.total_reward_units == reward_ceiling or time.perf_counter() >= deadline
+        )
+
+    def try_insertions(visits: tuple[PlannedVisit, ...], simulation: SimulationResult) -> None:
+        nonlocal best
+        if not simulation.report.valid:
+            return
+        for order in orders:
+            if finished():
+                return
+            _, candidate = insert_additional_contracts(
+                prepared, graph, visits, simulation, candidate_order=order
+            )
+            if (candidate.total_reward_units, -candidate.finish_seconds) > best.quality:
+                ids = tuple(
+                    sorted(
+                        {
+                            visit.contract_id
+                            for visit in candidate.visits
+                            if isinstance(visit, PlannedAction)
+                        }
+                    )
+                )
+                best = VerifiedRoute(ids, candidate)
+
+    tried_lanes: set[tuple[int, int]] = set()
+    for score in orders[1]:
+        if finished():
+            return best
+        contract = score.contract
+        lane = contract.origin_system_id, contract.destination_system_id
+        if lane in tried_lanes:
+            continue
+        tried_lanes.add(lane)
+        seed_problem = replace(
+            prepared, problem=replace(prepared.problem, contracts=(contract,)), scores=(score,)
+        )
+        visits = build_greedy_route_hint(seed_problem)
+        ids = tuple(sorted({v.contract_id for v in visits if isinstance(v, PlannedAction)}))
+        simulation = simulate_and_verify(prepared.problem, graph, visits, ids)
+        try_insertions(visits, simulation)
+
+    seed = best
+    contracts = {contract.contract_id: contract for contract in prepared.problem.contracts}
+    for removed in combinations(seed.selected_contract_ids, 2):
+        if finished():
+            break
+        visits = _remove_contract_visits(
+            seed.simulation.visits,
+            frozenset(removed),
+            contracts,
+            prepared.problem.constraints.required_system_ids,
+        )
+        ids = tuple(cid for cid in seed.selected_contract_ids if cid not in removed)
+        simulation = simulate_and_verify(prepared.problem, graph, visits, ids)
+        try_insertions(visits, simulation)
     return best

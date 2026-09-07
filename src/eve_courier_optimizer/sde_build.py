@@ -172,7 +172,11 @@ def build_route_database(
     temp_path.unlink(missing_ok=True)
 
     try:
-        with sqlite3.connect(temp_path) as connection, ZipFile(sde_zip) as archive:
+        with (
+            closing(sqlite3.connect(temp_path)) as connection,
+            connection,
+            ZipFile(sde_zip) as archive,
+        ):
             _create_schema(connection)
             connection.executemany(
                 "INSERT INTO metadata(key, value) VALUES (?, ?)",

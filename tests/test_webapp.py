@@ -23,13 +23,14 @@ from eve_courier_optimizer.domain import (
     SolveResult,
     ThreatCategory,
 )
-from eve_courier_optimizer.esi import EsiClient, HttpResponse
+from eve_courier_optimizer.esi import EsiClient, EsiError
+from eve_courier_optimizer.http import HttpResponse
 from eve_courier_optimizer.sde import Region, UniverseGraph
+from eve_courier_optimizer.session import PlanningSession, default_web_workspace
 from eve_courier_optimizer.threat_intel import ZkillClient
 from eve_courier_optimizer.webapp import (
-    LocalWebApplication,
+    asset,
     create_http_server,
-    default_web_workspace,
     run_local_web_ui,
 )
 
@@ -98,12 +99,48 @@ def post_json(url: str, payload: object, *, origin: str | None = None) -> dict[s
         return cast(dict[str, Any], json.load(response))
 
 
+@pytest.mark.parametrize(
+    "failure, status",
+    [
+        (ValueError("invalid input"), 400),
+        (EsiError("feed unavailable"), 502),
+        (RuntimeError("solver failure"), 500),
+        (OSError("disk unavailable"), 500),
+    ],
+)
+def test_http_distinguishes_invalid_input_external_failure_and_internal_failure(
+    tiny_graph: UniverseGraph,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    status: int,
+) -> None:
+    app = PlanningSession(tiny_graph, EsiClient(), tmp_path)
+
+    def fail(_body: dict[str, object]) -> dict[str, object]:
+        raise failure
+
+    monkeypatch.setattr(app, "solve", fail)
+    server = create_http_server(app, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(HTTPError) as caught:
+            post_json(f"http://127.0.0.1:{server.server_port}/api/solve", {})
+        assert caught.value.code == status
+        assert json.load(caught.value) == {"error": str(failure)}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_web_application_full_locked_workflow(
     tiny_graph: UniverseGraph,
     tmp_path: Path,
 ) -> None:
     transport = CourierTransport(datetime.now(UTC))
-    app = LocalWebApplication(tiny_graph, EsiClient(transport=transport), tmp_path)
+    app = PlanningSession(tiny_graph, EsiClient(transport=transport), tmp_path)
 
     assert app.region_matches("test")["items"] == [{"id": 10, "name": "Test Region"}]
     assert app.system_matches("alp")["items"][0]["name"] == "Alpha"
@@ -135,7 +172,7 @@ def test_web_application_full_locked_workflow(
     assert started["active_shipments"][0]["picked"] is False
     assert app.execution_path.exists()
 
-    restored = LocalWebApplication(
+    restored = PlanningSession(
         tiny_graph,
         EsiClient(transport=CourierTransport(datetime.now(UTC))),
         tmp_path,
@@ -173,7 +210,7 @@ def test_web_application_full_locked_workflow(
 
 
 def test_web_validation_errors_are_explicit(tiny_graph: UniverseGraph, tmp_path: Path) -> None:
-    app = LocalWebApplication(
+    app = PlanningSession(
         tiny_graph,
         EsiClient(transport=CourierTransport(datetime.now(UTC))),
         tmp_path,
@@ -232,19 +269,23 @@ def test_web_validation_errors_are_explicit(tiny_graph: UniverseGraph, tmp_path:
             app.solve({**planning_payload(), **update})
 
     app.solve(planning_payload())
-    assert app.result is not None
-    result = app.result
+    assert app.plan is not None
+    saved_plan = app.plan
+    result = app.plan.result
     bad_certificate = replace(result.certificate, feasibility_verified=False)
-    app.result = SolveResult(
-        result.selected_contract_ids,
-        result.route,
-        result.total_reward_units,
-        result.finish_seconds,
-        bad_certificate,
+    app.plan = replace(
+        saved_plan,
+        result=SolveResult(
+            result.selected_contract_ids,
+            result.route,
+            result.total_reward_units,
+            result.finish_seconds,
+            bad_certificate,
+        ),
     )
     with pytest.raises(ValueError, match="no independently verified"):
         app.start_execution({"confirm_locked_acceptance": True})
-    app.result = result
+    app.plan = saved_plan
     app.start_execution({"confirm_locked_acceptance": True})
     with pytest.raises(ValueError, match="execution session already exists"):
         app.solve(planning_payload())
@@ -258,7 +299,7 @@ def test_web_route_shape_controls_support_zero_cargo_waypoint_and_fixed_finish(
     tiny_graph: UniverseGraph,
     tmp_path: Path,
 ) -> None:
-    app = LocalWebApplication(
+    app = PlanningSession(
         tiny_graph,
         EsiClient(transport=CourierTransport(datetime.now(UTC))),
         tmp_path,
@@ -310,7 +351,7 @@ def test_web_modern_controls_record_security_time_isk_and_gank_policy(
     tiny_graph: UniverseGraph,
     tmp_path: Path,
 ) -> None:
-    app = LocalWebApplication(
+    app = PlanningSession(
         tiny_graph,
         EsiClient(transport=CourierTransport(datetime.now(UTC))),
         tmp_path,
@@ -372,7 +413,7 @@ def test_web_scan_scopes_zkill_to_proof_safe_route_reachable_regions(
             return ()
 
     zkill = RecordingZkillClient()
-    app = LocalWebApplication(
+    app = PlanningSession(
         graph,
         EsiClient(transport=CourierTransport(datetime.now(UTC))),
         tmp_path,
@@ -427,7 +468,7 @@ def test_web_contract_region_presets_use_sde_security_and_faction_metadata(
         },
         metadata=tiny_graph.metadata,
     )
-    app = LocalWebApplication(
+    app = PlanningSession(
         graph,
         EsiClient(transport=CourierTransport(datetime.now(UTC))),
         tmp_path,
@@ -454,7 +495,7 @@ def test_web_gate_threat_categories_create_auditable_hard_avoids(
     tmp_path: Path,
     now: datetime,
 ) -> None:
-    app = LocalWebApplication(
+    app = PlanningSession(
         tiny_graph,
         EsiClient(transport=CourierTransport(now)),
         tmp_path,
@@ -502,7 +543,7 @@ def test_web_modern_control_validation_and_missing_activity(
     tiny_graph: UniverseGraph,
     tmp_path: Path,
 ) -> None:
-    app = LocalWebApplication(
+    app = PlanningSession(
         tiny_graph,
         EsiClient(transport=CourierTransport(datetime.now(UTC))),
         tmp_path,
@@ -538,7 +579,7 @@ def test_replan_and_actions_require_execution_state(
     tiny_graph: UniverseGraph,
     tmp_path: Path,
 ) -> None:
-    app = LocalWebApplication(
+    app = PlanningSession(
         tiny_graph,
         EsiClient(transport=CourierTransport(datetime.now(UTC))),
         tmp_path,
@@ -554,7 +595,7 @@ def test_web_http_boundary_serves_assets_and_rejects_nonlocal_host(
     tiny_graph: UniverseGraph,
     tmp_path: Path,
 ) -> None:
-    app = LocalWebApplication(
+    app = PlanningSession(
         tiny_graph,
         EsiClient(transport=CourierTransport(datetime.now(UTC))),
         tmp_path,
@@ -723,19 +764,13 @@ def test_cli_web_subcommand_delegates_without_starting_server(
     }
 
 
-def test_web_assets_are_packaged_as_external_csp_safe_resources(
-    tiny_graph: UniverseGraph,
-    tmp_path: Path,
-) -> None:
-    app = LocalWebApplication(
-        tiny_graph,
-        EsiClient(transport=CourierTransport(datetime.now(UTC))),
-        tmp_path,
+def test_web_assets_are_packaged_as_external_csp_safe_resources() -> None:
+    html = asset("index.html")[0].decode()
+    css = asset("styles.css")[0].decode()
+    javascript = "\n".join(
+        asset(name)[0].decode() for name in ("app.js", "planner_form.js", "route_view.js")
     )
-    html = app.asset("index.html")[0].decode()
-    css = app.asset("styles.css")[0].decode()
-    javascript = app.asset("app.js")[0].decode()
-    assert '<script src="app.js" defer></script>' in html
+    assert '<script type="module" src="app.js"></script>' in html
     assert "Optimality is relative" in html
     assert "Use all SDE regions" in html
     assert "Match security bands" in html
@@ -760,7 +795,7 @@ def test_web_assets_are_packaged_as_external_csp_safe_resources(
     assert "--cyan" in css
     assert ".execution-lock-banner" in css
     with pytest.raises(FileNotFoundError):
-        app.asset("../pyproject.toml")
+        asset("../pyproject.toml")
 
 
 def test_web_workspace_platform_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -802,7 +837,7 @@ def test_run_local_web_ui_lifecycle(
         run_local_web_ui(tiny_graph, port=0, workspace=tmp_path, open_browser=False)
     with pytest.raises(ValueError, match="between 0 and 65535"):
         create_http_server(
-            LocalWebApplication(
+            PlanningSession(
                 tiny_graph,
                 EsiClient(transport=CourierTransport(datetime.now(UTC))),
                 tmp_path / "bad-port",

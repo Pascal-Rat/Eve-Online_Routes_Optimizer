@@ -6,13 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from eve_courier_optimizer.esi import (
-    EsiClient,
-    EsiError,
-    EsiHttpError,
-    EsiResponseCache,
-    HttpResponse,
-)
+from eve_courier_optimizer.esi import EsiClient, EsiError, EsiHttpError
+from eve_courier_optimizer.http import HttpResponse, ResponseCache
 
 
 class QueueTransport:
@@ -85,7 +80,7 @@ def test_cache_avoids_repeated_request(tmp_path: Path) -> None:
     )
     client = EsiClient(
         transport=transport,
-        cache=EsiResponseCache(tmp_path / "cache.sqlite3"),
+        cache=ResponseCache(tmp_path / "cache.sqlite3"),
         now=lambda: 1.0,
     )
     assert len(client.public_couriers(10)) == 1
@@ -140,7 +135,7 @@ def test_conditional_304_preserves_cached_pagination_headers(tmp_path: Path) -> 
             ),
         ]
     )
-    cache = EsiResponseCache(tmp_path / "cache.sqlite3")
+    cache = ResponseCache(tmp_path / "cache.sqlite3")
     EsiClient(transport=first_transport, cache=cache, now=lambda: 0.0).public_couriers(10)
 
     second_transport = QueueTransport(
@@ -238,3 +233,96 @@ def test_network_errors_retry_and_exhaust_as_esi_errors() -> None:
     with pytest.raises(EsiError, match="network request failed") as raised:
         client.public_couriers(10)
     assert isinstance(raised.value.__cause__, TimeoutError)
+
+
+def test_cache_separates_esi_compatibility_dates(tmp_path: Path) -> None:
+    cache = ResponseCache(tmp_path / "cache.sqlite3")
+    transport = QueueTransport(
+        [
+            response(
+                [courier(1)], headers={"Expires": "Fri, 01 Jan 2100 00:00:00 GMT", "ETag": '"v1"'}
+            ),
+            response([courier(2)], headers={"Expires": "Fri, 01 Jan 2100 00:00:00 GMT"}),
+        ]
+    )
+    first = EsiClient(cache=cache, transport=transport, compatibility_date="2026-08-05")
+    second = EsiClient(cache=cache, transport=transport, compatibility_date="2026-09-01")
+    assert first.public_couriers(10)[0].contract_id == 1
+    assert second.public_couriers(10)[0].contract_id == 2
+    assert "If-None-Match" not in transport.calls[1][1]
+    assert first.public_couriers(10)[0].contract_id == 1
+    assert len(transport.calls) == 2
+
+
+@pytest.mark.parametrize("body", [b'{"broken":', b"\xff"])
+def test_malformed_success_is_not_cached(tmp_path: Path, body: bytes) -> None:
+    transport = QueueTransport(
+        [
+            HttpResponse(200, {"expires": "Fri, 01 Jan 2100 00:00:00 GMT"}, body),
+            response([courier(1)]),
+        ]
+    )
+    client = EsiClient(cache=ResponseCache(tmp_path / "cache.sqlite3"), transport=transport)
+    with pytest.raises(EsiError, match="valid JSON"):
+        client.public_couriers(10)
+    assert client.public_couriers(10)[0].contract_id == 1
+    assert len(transport.calls) == 2
+
+
+@pytest.mark.parametrize(
+    "header, expected",
+    [
+        ("Thu, 01 Jan 1970 00:00:05 GMT", 3.0),
+        ("invalid", 1.0),
+        ("nan", 1.0),
+        ("inf", 1.0),
+    ],
+)
+def test_rate_limit_date_and_invalid_retry_headers(header: str, expected: float) -> None:
+    sleeps: list[float] = []
+    client = EsiClient(
+        transport=QueueTransport(
+            [response({}, status=429, headers={"retry-after": header}), response([])]
+        ),
+        now=lambda: 2.0,
+        sleep=sleeps.append,
+    )
+    assert client.public_couriers(10) == ()
+    assert sleeps == [expected]
+
+
+@pytest.mark.parametrize(
+    "field, value", [("contract_id", True), ("days_to_complete", 1.5), ("volume", {})]
+)
+def test_malformed_courier_cannot_silently_change_the_observed_problem(
+    field: str, value: object
+) -> None:
+    row = courier(1)
+    row[field] = value
+    client = EsiClient(transport=QueueTransport([response([row])]))
+    with pytest.raises(EsiError, match="invalid courier"):
+        client.public_couriers(10)
+
+
+@pytest.mark.parametrize("payload, pages", [([42], "1"), ([], "0"), ([], "invalid")])
+def test_invalid_public_page_is_not_a_partial_observation(payload: object, pages: str) -> None:
+    client = EsiClient(transport=QueueTransport([response(payload, headers={"x-pages": pages})]))
+    with pytest.raises(EsiError, match="invalid public-contract response"):
+        client.public_couriers(10)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
+def test_clients_reject_invalid_timeouts(timeout: float) -> None:
+    from eve_courier_optimizer.threat_intel import ZkillClient
+
+    for client in (EsiClient, ZkillClient):
+        with pytest.raises(ValueError, match="timeout"):
+            client(timeout_seconds=timeout)
+
+
+def test_clients_reject_negative_retry_counts() -> None:
+    from eve_courier_optimizer.threat_intel import ZkillClient
+
+    for client in (EsiClient, ZkillClient):
+        with pytest.raises(ValueError, match="retry count"):
+            client(max_retries=-1)

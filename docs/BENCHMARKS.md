@@ -1,173 +1,73 @@
-# Benchmark suite
+# Reproducible benchmarks
 
-The release has two complementary frozen benchmark layers. The small synthetic universe is the fast
-CI **proof regression**; the real NPC-Empire observation is the canonical **performance baseline**.
-Both exercise preparation, gate-threat filtering, CP-SAT, certificates and independent feasibility
-verification without letting a moving contract market invalidate comparisons between code changes.
+## Workloads and hard checks
 
-For harder solver mechanics, the opt-in `benchmarks.run_stress` runner adds eight stress
-profiles and compares incumbent reward, rigorous ceiling, and actual elapsed time across budgets
-and seeds. Run `python -m benchmarks.run_stress --time-limit 30 --seed 17 --output results.jsonl`.
-The time limit is the full-event fallback budget; decomposition and model construction are additional.
-Output includes the complete solver configuration, Python source hash, runner hash, versions, and
-mathematical input fingerprint. Use the same runner with each solver checkout, and run comparisons
-sequentially to avoid CPU contention. Stress cases permit open proofs; they do not replace the exact
-golden-reward checks below.
+| Runner | Frozen problem | Required result |
+| --- | --- | --- |
+| `run_frozen` | 18 systems, 24 observed couriers, threat evidence; DST and BR profiles each retain 12 eligible jobs | DST 250M ISK, BR 165M ISK; both proven optimal, untruncated and independently verified |
+| `run_empire` | 421 real observed NPC Empire couriers, 250 gate events, pinned SDE 3458726; one-hour Jita loops | DST: 96 eligible, 58M ISK. BR: 48 eligible, 25.651527M ISK. Both closed proofs with matching bounds. |
+| `run_stress` | Eight deterministic cases: Empire locked/rolling and two-hour variants, shared-lane capacity, clustered locked/rolling and required-waypoint routes | Compare feasibility, reward, bound, proof closure and runtime under identical settings; open proofs are reported explicitly |
 
-The opt-in `benchmarks.explore_avenues` runner compares route reconstruction, lifted packing,
-and cumulative propagation. Its records include adapter hashes. Run
-`python -m benchmarks.explore_avenues repair_both --time-limit 30` for the cumulative experiment.
-`benchmarks.probe_solver_avenues` separately measures restricted exact neighborhoods.
-
-## Why the universe is frozen
-
-A live ESI benchmark is not repeatable: contracts disappear, pagination moves, prices change, and
-threat observations age while the test is running. It also cannot distinguish a performance
-regression from a different market instance.
-
-`benchmarks/frozen_universe.json` therefore pins:
-
-- an 18-system high/low/null stargate graph;
-- SDE identity and snapshot time;
-- 24 public courier contracts;
-- three gate-threat observations with smartbomb, suicide-gank, HIC, carrier, and camp signatures;
-- exact capacity/collateral/horizon/travel values; and
-- an explicit return-to-start loop; and
-- the selected threat/security policy for each scenario.
-
-This fixture is deliberately small enough for routine CI while still requiring subset selection,
-pickup/delivery ordering, threat-induced graph filtering, and an objective proof.
-
-## Canonical realistic baseline: NPC Empire
-
-`empire_snapshot_2026-08-06.json` is a frozen slice of the real Tranquility observation captured at
-`2026-08-06T16:58:14Z`. It contains all 421 observed courier contracts whose ESI pickup region was
-one of the 24 faction-owned high/low NPC-Empire regions, plus all 250 retained gate-threat events.
-Threat coverage is complete for exactly those 24 regions.
-
-This is now the preferred baseline for measuring solver changes because its preparation density and
-candidate counts came from a real market rather than a hand-sized synthetic graph. The two standard
-profiles deliberately have **no candidate cap**:
-
-| Profile | Cargo | Collateral | Horizon | Route | Security | Eligible contracts |
-| --- | ---: | ---: | ---: | --- | --- | ---: |
-| DST | 62,500 m³ | 10 B ISK | 1 hour | Jita loop | high | 96 |
-| Blockade runner | 13,000 m³ | 5 B ISK | 1 hour | Jita loop | high + low | 48 |
-
-Both start and finish in Jita, use locked collateral, 75 seconds/jump, 30 seconds/action, a one-event
-hard-avoid threshold, and all six focused threat categories (suicide gank, smartbomb, HIC/tackle,
-carrier, multi-pilot camp and hauler loss). Four workers and a 60-second full-route search are the
-reference fallback run. V1.5 first gives each deterministic single-worker master solve up to ten
-seconds inside a 20-second decomposition envelope. Reduced exact/core work uses the requested four
-workers. Reported solver wall time includes every master and exact-subproblem solve actually used.
-
-The v1.5 release run on this environment is:
-
-| Profile | Status | Incumbent | Upper bound | Gap | Solver wall | Branches |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Blockade runner | `proven_optimal` | **25.651527 M ISK** | **25.651527 M ISK** | **0.000%** | 0.614 s | 7,095 |
-| DST | `proven_optimal` | **58.000000 M ISK** | **58.000000 M ISK** | **0.000%** | 7.769 s | 62,088 |
-
-Both routes passed independent feasibility verification and close in the first master/exact
-iteration. For DST, the optimal system master selects five contracts worth 58 M ISK. The reduced
-exact event model routes all five, so the verified 58 M lower bound meets the rigorous 58 M master
-upper bound. Neither profile enters the configured 60-second full-event fallback. The mathematical
-input fingerprints remain unchanged because decomposition changes the proof method, not the problem.
-
-For comparison, the v1.4 run used the same input but treated the system relaxation only as a passive
-ceiling:
-
-| Profile | Status | Incumbent | Upper bound | Gap | Solver wall |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Blockade runner | `proven_optimal` | 25.651527 M ISK | 25.651527 M ISK | 0.000% | 8.109 s |
-| DST | `feasible_not_proven` | 41.251527 M ISK | 58.000000 M ISK | 40.601% | 64.002 s |
-
-For direct comparison, the v1.3 loop-aware 60-second/four-worker reference run was:
-
-| Profile | Status | Incumbent | Upper bound | Gap | Branches |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Blockade runner | `feasible_not_proven` | 25.651527 M ISK | 58.344302 M ISK | 127.450% | 896,204 |
-| DST | `feasible_not_proven` | 39.357511 M ISK | 176.598539 M ISK | 348.704% | 198,883 |
-
-The solver-reported wall times were 60.092 s and 60.037 s respectively. Both incumbents passed
-independent feasibility verification. Multi-worker incumbent/branch trajectories are not golden
-values; the immutable loop-aware problem fingerprints are
-`3fbb834f9cc9bd81cc314ff41558f789846f0273b35056afc76cf2be77da9fab` (BR) and
-`638062bb2505871841160776fe0b1b7e17a7edfb0b9a789d3aa98b6b0d774dd0` (DST).
-
-The source observation used SDE 3457062. Before normalizing the fixture to the benchmark SDE
-3458726, the benchmark preparation verified that all 8,490 systems, stargate adjacency, 5,210 NPC
-station mappings and 13,978 normal stargates were identical between the two route databases. The
-provenance and hashes are in `empire_baseline_manifest.json`.
-
-The benchmark now pins that SDE in `benchmarks/empire_sde_3458726.sqlite3.gz`, independently
-of the application’s bundled build. `load_empire_graph()` loads it for both Empire runners, so
-upgrading the application SDE preserves the frozen problem fingerprints and golden rewards.
-
-Run the realistic baseline explicitly. It is not part of routine pytest because the fallback budget
-still permits one-minute full-event searches on instances where decomposition cannot close:
+The Empire fixture has its own compressed SDE and [provenance manifest](../benchmarks/empire_fixture_manifest.json).
+Updating the application's bundled SDE must not change benchmark fingerprints. Synthetic stress
+seeds control both contract generation and solver search; Empire inputs are fixed independently of
+the seed. Known optima are enforced by the runners and tests.
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m benchmarks.run_empire --time-limit 60 --workers 4
+python -m benchmarks.run_frozen --time-limit 10
+python -m benchmarks.run_empire --time-limit 60 --workers 4
+python -m benchmarks.run_stress --time-limit 10 --seed 17 --workers 4 --output benchmarks/results/stress-10.jsonl
+python -m benchmarks.run_stress --time-limit 30 --seed 71 --workers 4 --output benchmarks/results/stress-30.jsonl
+python -m benchmarks.measure_pipeline --repeat 3 --output benchmarks/results/pipeline.jsonl
 ```
 
-Multi-worker CP-SAT is portfolio search, so incumbent reward and branch count are observations, not
-golden assertions. Stable comparison points are the frozen problem, eligible count, proof scope,
-objective bound/gap and whether independent feasibility verification succeeds.
+Gold runners exit unsuccessfully on a quality, proof, scope or feasibility regression. Stress output
+includes complete solver settings, source/runner hashes, dependency versions, problem fingerprint,
+reward, bound, proof status, selected IDs, route finish and phase search times. Pipeline measurements
+isolate preparation, construction, selection cuts, system-master building and complete-event building
+without starting CP-SAT. They include variable/constraint/arc counts and model hashes.
 
-## Scenarios
+Commit benchmark inputs, runners and regression assertions. Results, solver dumps and console logs
+are generated artifacts; `benchmarks/results/` is ignored by Git. Each `--output` appends one JSON
+record per observation, so use a fresh output path for each measurement campaign.
 
-| Scenario | Cargo | Collateral | Horizon | Security | Selected threat categories |
-| --- | ---: | ---: | ---: | --- | --- |
-| DST | 62,500 m³ | 10 B ISK | 1 hour | high | suicide gank, smartbomb, camp, hauler loss |
-| Blockade runner | 13,000 m³ | 5 B ISK | 1 hour | high + low | suicide gank, smartbomb, HIC, carrier, camp, hauler loss |
+## Compare revisions
 
-Both use 75 seconds per jump, 30 seconds per action, one CP-SAT worker, no candidate cap, and at
-least one matching event as the hard-avoid threshold.
+Use the same interpreter and OR-Tools installation. Run revisions sequentially and alternate their
+order across repeated trials; do not run tests or competing solvers at the same time. Include every
+trial in the comparison, including unsuccessful or unfavorable runs. Compare the same cases, seeds,
+workers and budgets, then verify mathematical input fingerprints before interpreting performance.
 
-## Run
-
-From an editable development install:
+To measure a baseline, replace `BASELINE_REF` below with the tag or commit being compared:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m benchmarks.run_frozen --time-limit 10
+mkdir -p /tmp/eve-router-baseline
+git archive BASELINE_REF | tar -x -C /tmp/eve-router-baseline
 ```
 
-The automated regression is:
+Use an empty baseline directory. From there, run the stress commands above using the current
+environment's absolute Python path and `PYTHONPATH=src`. Run them from this checkout with the same
+arguments, repeating both revisions. Summarize the observations with:
 
 ```bash
-.venv/bin/pytest tests/test_benchmarks.py
+python -m benchmarks.compare_results \
+  --baseline /tmp/eve-router-baseline/benchmarks/results/stress-10.jsonl \
+             /tmp/eve-router-baseline/benchmarks/results/stress-30.jsonl \
+  --candidate benchmarks/results/stress-10.jsonl benchmarks/results/stress-30.jsonl
 ```
 
-The runner exits nonzero unless every scenario returns `proven_optimal`, has untruncated scope, and
-passes independent feasibility verification, and matches the frozen reward (250M ISK for DST,
-165M for BR). The Empire runner also requires a closed proof and the exact reward and bound:
-58M ISK for DST and 25,651,527 ISK for BR. Both runners execute in CI.
+The comparator rejects mismatched problem/settings groups and unverified routes. It displays reward
+and bound ranges, proof counts and median elapsed times; it does not hide an unfavorable trial behind
+one average or turn a timing threshold into an optimization theorem.
 
-## Small-fixture reference result
+The full-event time limit is **not** an end-to-end deadline. Decomposition, model construction and
+secondary duration refinement have separate costs. Stress runs disable secondary refinement to
+compare primary search. Use total elapsed for operator latency and phase times for diagnosis.
+Multiworker CP-SAT is nondeterministic. Even a single-worker master can cross a wall-time cutoff on a
+busy or slower CPU and change the later proof trajectory. Investigate repeated distributions and
+model/hint equality, while retaining every known optimum as an exact quality requirement.
 
-The compact release-tree run, with loop closure explicit in the fixture runner, produces:
-
-| Scenario | Status | Eligible | Selected | Reward | Solve + prepare |
-| --- | --- | ---: | ---: | ---: | ---: |
-| DST | `proven_optimal` | 12 | 3 | 250 M ISK | 0.158 s |
-| Blockade runner | `proven_optimal` | 12 | 2 | 165 M ISK | 0.135 s |
-
-Elapsed time is informational and will differ by CPU, operating system, Python/OR-Tools build, and
-background load. The stable regression requirements are the proof status, untruncated scope,
-independent feasibility, and exact expected reward, rather than a wall-clock threshold or one route
-among objective ties.
-
-## What this benchmark does not claim
-
-- It does not estimate how many live contracts will be eligible.
-- It does not promise that a large all-region snapshot will prove within ten seconds.
-- It does not measure real DST or blockade-runner align/warp/dock performance; the travel model is a
-  declared synthetic input.
-- It does not validate the empirical predictive power of threat categories.
-- It does not replace live SDE/ESI compatibility tests.
-
-Its purpose is narrower and auditable: the two requested model profiles have small regression cases
-that repeatedly reach a genuine global optimum certificate through the same code used in production.
-Use the frozen Empire fixture above for realistic solver performance, and
-[LIVE_BENCHMARKS.md](LIVE_BENCHMARKS.md) for the provenance and dated live observations.
+`peak_resident_bytes` is a process high-water mark (null on Windows), not per-model allocated memory.
+To compare a particular case's memory, run `measure_pipeline --cases CASE --repeat 1` in a fresh
+process for each revision with equivalent instrumentation and object lifetimes. Do not compare one
+script retaining previous models with another that releases each case's local objects.

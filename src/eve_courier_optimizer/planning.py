@@ -9,7 +9,7 @@ claim of optimality over the full snapshot.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import timedelta
 from math import inf
 
@@ -21,7 +21,8 @@ from .domain import (
     RoutableContract,
     RouteProblem,
 )
-from .sde import UniverseGraph, build_jump_matrix
+from .route_policy import reachable_threat_regions
+from .sde import UniverseGraph
 from .snapshot import ContractSnapshot
 
 
@@ -61,8 +62,8 @@ def _score(
     solo_jumps: int,
     solo_seconds: int,
 ) -> SingleContractScore:
-    reward_isk = contract.contract.reward_units / 100.0
-    collateral_isk = contract.contract.collateral_units / 100.0
+    reward_isk = contract.reward_units / 100.0
+    collateral_isk = contract.collateral_units / 100.0
     return SingleContractScore(
         contract=contract,
         solo_jumps=solo_jumps,
@@ -83,31 +84,14 @@ def _validate_threat_coverage(
     if not security.threat_categories:
         return
 
-    # Threat/activity avoids are observations that can change on the next refresh. Strip them when
-    # deriving the coverage envelope so a region cannot disappear from required coverage merely
-    # because yesterday's observation happened to block the only gate leading to it. Manual avoids
-    # and the declared security bands are stable operator policy and therefore remain in force.
-    coverage_policy = replace(
-        security,
-        gank_avoided_system_ids=frozenset(),
-        gank_ship_kill_threshold=None,
-        gank_activity_fetched_at=None,
-        threat_avoided_system_ids=frozenset(),
-        threat_categories=frozenset(),
-        threat_min_events=None,
-        threat_intel_fetched_at=None,
-        threat_window_seconds=None,
-        threat_gate_radius_m=None,
-        threat_coverage_region_ids=frozenset(),
-        threat_incomplete_region_ids=frozenset(),
+    required = reachable_threat_regions(
+        graph,
+        start_system_id=constraints.start_system_id,
+        security=security,
+        horizon_seconds=constraints.horizon_seconds,
+        seconds_per_jump=constraints.travel.seconds_per_jump,
     )
-    max_jumps = constraints.horizon_seconds // constraints.travel.seconds_per_jump
-    required = graph.reachable_region_ids(
-        constraints.start_system_id,
-        coverage_policy,
-        max_jumps=max_jumps,
-    )
-    missing = required - security.threat_coverage_region_ids
+    missing = set(required) - security.threat_coverage_region_ids
     if not missing:
         return
     names = [
@@ -174,7 +158,7 @@ def _validate_active_shipments(
 ) -> tuple[set[int], int]:
     """Return active IDs and their initial cargo/collateral after validating limits."""
 
-    active_contract_ids = {shipment.contract.contract.contract_id for shipment in active_shipments}
+    active_contract_ids = {shipment.contract.contract_id for shipment in active_shipments}
     if len(active_contract_ids) != len(active_shipments):
         raise ValueError("active shipment contract IDs must be unique")
 
@@ -186,10 +170,10 @@ def _validate_active_shipments(
         raise ValueError("active shipments already exceed the simultaneous-contract limit")
 
     initial_cargo_load_units = sum(
-        shipment.contract.contract.volume_units for shipment in active_shipments if shipment.picked
+        shipment.contract.volume_units for shipment in active_shipments if shipment.picked
     )
     initial_locked_collateral_units = sum(
-        shipment.contract.contract.collateral_units for shipment in active_shipments
+        shipment.contract.collateral_units for shipment in active_shipments
     )
     if initial_cargo_load_units > constraints.cargo_capacity_units:
         raise ValueError("active shipments already exceed cargo capacity")
@@ -244,7 +228,7 @@ def _resolve_routable_contracts(
             continue
 
         routable_contracts.append(
-            RoutableContract(
+            RoutableContract.resolve(
                 contract=public_contract,
                 origin_system_id=origin_system_id,
                 destination_system_id=destination_system_id,
@@ -307,7 +291,7 @@ def _filter_individually_feasible_contracts(
     eligible_contracts: list[RoutableContract] = []
     contract_scores: list[SingleContractScore] = []
     for routable_contract in routable_contracts:
-        public_contract = routable_contract.contract
+        public_contract = routable_contract
         if public_contract.date_expired <= constraints.snapshot_time:
             safe_reductions["listing_expired"] += 1
             continue
@@ -395,8 +379,8 @@ def _apply_candidate_cap(
         zip(eligible_contracts, contract_scores, strict=True),
         key=lambda contract_and_score: (
             contract_and_score[1].reward_per_hour_isk,
-            contract_and_score[0].contract.reward_units,
-            -contract_and_score[0].contract.contract_id,
+            contract_and_score[0].reward_units,
+            -contract_and_score[0].contract_id,
         ),
         reverse=True,
     )
@@ -472,7 +456,7 @@ def prepare_problem(
         if not shipment.picked:
             relevant_system_ids.add(shipment.contract.origin_system_id)
         relevant_system_ids.add(shipment.contract.destination_system_id)
-    jump_matrix = build_jump_matrix(graph, relevant_system_ids, constraints.security)
+    jump_matrix = graph.jump_matrix(relevant_system_ids, constraints.security)
 
     scope = ProblemScope(
         snapshot_fetched_at=snapshot.fetched_at,
@@ -504,7 +488,7 @@ def rank_single_contracts(prepared: PreparedProblem) -> tuple[SingleContractScor
             prepared.scores,
             key=lambda score: (
                 score.reward_per_hour_isk,
-                score.contract.contract.reward_units,
+                score.contract.reward_units,
             ),
             reverse=True,
         )

@@ -1,8 +1,7 @@
-"""Iteration 4: persistent execution state and rolling replanning transitions."""
+"""Persistent accepted commitments, real progress, and replanning constraints."""
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -13,16 +12,27 @@ from .domain import (
     CollateralMode,
     PlanningConstraints,
     RoutableContract,
-    SecurityBand,
     SecurityPolicy,
     SolveResult,
-    ThreatCategory,
     TravelTimeModel,
     parse_esi_datetime,
 )
+from .jsonio import (
+    json_array,
+    json_bool,
+    json_int,
+    json_object,
+    json_string,
+    read_json_object,
+    write_json,
+)
+from .route_policy import (
+    observed_security_policy,
+    security_policy_from_dict,
+    security_policy_to_dict,
+)
 from .sde import UniverseGraph
 from .snapshot import ContractSnapshot, contract_from_dict, contract_to_dict
-from .threat_intel import threat_avoided_systems
 
 EXECUTION_STATE_SCHEMA_VERSION: Final = 3
 
@@ -62,14 +72,14 @@ class ExecutionState:
             raise ValueError("completed contract IDs must be positive")
         if len(self.completed_contract_ids) != len(set(self.completed_contract_ids)):
             raise ValueError("completed contract IDs must be unique")
-        active_ids = {shipment.contract.contract.contract_id for shipment in self.active_shipments}
+        active_ids = {shipment.contract.contract_id for shipment in self.active_shipments}
         if len(active_ids) != len(self.active_shipments):
             raise ValueError("active shipment contract IDs must be unique")
-        if sum(s.contract.contract.volume_units for s in self.active_shipments if s.picked) > (
+        if sum(s.contract.volume_units for s in self.active_shipments if s.picked) > (
             self.cargo_capacity_units
         ):
             raise ValueError("execution cargo exceeds cargo capacity")
-        if sum(s.contract.contract.collateral_units for s in self.active_shipments) > (
+        if sum(s.contract.collateral_units for s in self.active_shipments) > (
             self.collateral_budget_units
         ):
             raise ValueError("execution collateral exceeds budget")
@@ -98,16 +108,14 @@ def initial_execution_state(
     contract is considered accepted until the user actually reaches its pickup and records it.
     """
 
-    active_by_id = {
-        shipment.contract.contract.contract_id: shipment for shipment in active_shipments
-    }
+    active_by_id = {shipment.contract.contract_id: shipment for shipment in active_shipments}
     if constraints.collateral_mode is CollateralMode.LOCKED:
-        optional = {item.contract.contract_id: item for item in contracts}
+        optional = {item.contract_id: item for item in contracts}
         for contract_id in result.selected_contract_ids:
             item = optional[contract_id]
             active_by_id[contract_id] = ActiveShipment(
                 contract=item,
-                deadline=constraints.snapshot_time + timedelta(days=item.contract.days_to_complete),
+                deadline=constraints.snapshot_time + timedelta(days=item.days_to_complete),
                 picked=False,
             )
     return ExecutionState(
@@ -150,45 +158,17 @@ def constraints_for_replan(
         if not shipment.picked:
             exemptions.add(shipment.contract.origin_system_id)
         exemptions.add(shipment.contract.destination_system_id)
-    threshold = security.gank_ship_kill_threshold
-    if threshold is not None:
-        if snapshot.system_kills_fetched_at is None:
-            raise ValueError(
-                "gank awareness is active but the refreshed snapshot has no system-kill activity"
-            )
-        # A refreshed risk snapshot must never strand commitments the user has already accepted.
-        # Their required endpoints (and the current system) remain serviceable; transit still
-        # avoids every other system at or above the declared activity threshold.
-        gank_avoids = {
-            item.system_id
-            for item in snapshot.system_kill_activity
-            if item.ship_kills >= threshold and item.system_id not in exemptions
-        }
-        security = replace(
-            security,
-            gank_avoided_system_ids=frozenset(gank_avoids),
-            gank_activity_fetched_at=snapshot.system_kills_fetched_at,
-        )
-    if security.threat_categories:
-        if snapshot.threat_intel_fetched_at is None:
-            raise ValueError(
-                "gate-threat awareness is active but the refreshed snapshot has no zKill intel"
-            )
-        assert security.threat_min_events is not None
-        security = replace(
-            security,
-            threat_avoided_system_ids=threat_avoided_systems(
-                snapshot.gate_threat_events,
-                security.threat_categories,
-                minimum_events=security.threat_min_events,
-                exempt_system_ids=frozenset(exemptions),
-            ),
-            threat_intel_fetched_at=snapshot.threat_intel_fetched_at,
-            threat_window_seconds=snapshot.threat_window_seconds,
-            threat_gate_radius_m=snapshot.threat_gate_radius_m,
-            threat_coverage_region_ids=frozenset(snapshot.threat_coverage_region_ids),
-            threat_incomplete_region_ids=frozenset(snapshot.threat_incomplete_region_ids),
-        )
+    # Refreshed observations may not strand already accepted obligations.
+    security = observed_security_policy(
+        snapshot,
+        minimum_security=security.minimum_security,
+        allowed_bands=security.allowed_bands,
+        avoided_system_ids=security.avoided_system_ids,
+        activity_threshold=security.gank_ship_kill_threshold,
+        threat_categories=security.threat_categories,
+        threat_min_events=security.threat_min_events,
+        exempt_system_ids=frozenset(exemptions),
+    )
     return PlanningConstraints(
         start_system_id=state.current_system_id,
         cargo_capacity_units=state.cargo_capacity_units,
@@ -216,9 +196,7 @@ def record_pickup(
 
     if at.tzinfo is None or at < state.current_time:
         raise ValueError("pickup time must be timezone-aware and cannot precede recorded progress")
-    active_by_id = {
-        shipment.contract.contract.contract_id: shipment for shipment in state.active_shipments
-    }
+    active_by_id = {shipment.contract.contract_id: shipment for shipment in state.active_shipments}
     existing = active_by_id.get(contract_id)
     if existing is not None:
         if existing.picked:
@@ -226,11 +204,9 @@ def record_pickup(
         if at > existing.deadline:
             raise ValueError(f"contract {contract_id} is past its delivery deadline")
         cargo_now = sum(
-            shipment.contract.contract.volume_units
-            for shipment in state.active_shipments
-            if shipment.picked
+            shipment.contract.volume_units for shipment in state.active_shipments if shipment.picked
         )
-        if cargo_now + existing.contract.contract.volume_units > state.cargo_capacity_units:
+        if cargo_now + existing.contract.volume_units > state.cargo_capacity_units:
             raise ValueError("pickup would exceed cargo capacity")
         if (
             state.max_simultaneous_contracts is not None
@@ -266,13 +242,9 @@ def record_pickup(
         destination, state.security
     ):
         raise ValueError("rolling pickup violates the execution security policy")
-    locked_now = sum(
-        shipment.contract.contract.collateral_units for shipment in state.active_shipments
-    )
+    locked_now = sum(shipment.contract.collateral_units for shipment in state.active_shipments)
     cargo_now = sum(
-        shipment.contract.contract.volume_units
-        for shipment in state.active_shipments
-        if shipment.picked
+        shipment.contract.volume_units for shipment in state.active_shipments if shipment.picked
     )
     if locked_now + public.collateral_units > state.collateral_budget_units:
         raise ValueError("pickup would exceed collateral budget")
@@ -284,7 +256,7 @@ def record_pickup(
         > state.max_simultaneous_contracts
     ):
         raise ValueError("pickup would exceed the simultaneous-contract limit")
-    routable = RoutableContract(public, origin, destination)
+    routable = RoutableContract.resolve(public, origin, destination)
     active_by_id[contract_id] = ActiveShipment(
         contract=routable,
         deadline=at + timedelta(days=public.days_to_complete),
@@ -304,9 +276,7 @@ def record_delivery(state: ExecutionState, contract_id: int, at: datetime) -> Ex
         raise ValueError(
             "delivery time must be timezone-aware and cannot precede recorded progress"
         )
-    active_by_id = {
-        shipment.contract.contract.contract_id: shipment for shipment in state.active_shipments
-    }
+    active_by_id = {shipment.contract.contract_id: shipment for shipment in state.active_shipments}
     shipment = active_by_id.get(contract_id)
     if shipment is None:
         raise ValueError(f"contract {contract_id} is not an active commitment")
@@ -381,40 +351,11 @@ def execution_state_to_dict(state: ExecutionState) -> dict[str, Any]:
             "seconds_per_jump": state.travel.seconds_per_jump,
             "service_seconds": state.travel.service_seconds,
         },
-        "security": {
-            "minimum_security": state.security.minimum_security,
-            "avoided_system_ids": sorted(state.security.avoided_system_ids),
-            "allowed_bands": (
-                sorted(band.value for band in state.security.allowed_bands)
-                if state.security.allowed_bands is not None
-                else None
-            ),
-            "gank_avoided_system_ids": sorted(state.security.gank_avoided_system_ids),
-            "gank_ship_kill_threshold": state.security.gank_ship_kill_threshold,
-            "gank_activity_fetched_at": (
-                state.security.gank_activity_fetched_at.isoformat()
-                if state.security.gank_activity_fetched_at is not None
-                else None
-            ),
-            "threat_avoided_system_ids": sorted(state.security.threat_avoided_system_ids),
-            "threat_categories": sorted(
-                category.value for category in state.security.threat_categories
-            ),
-            "threat_min_events": state.security.threat_min_events,
-            "threat_intel_fetched_at": (
-                state.security.threat_intel_fetched_at.isoformat()
-                if state.security.threat_intel_fetched_at is not None
-                else None
-            ),
-            "threat_window_seconds": state.security.threat_window_seconds,
-            "threat_gate_radius_m": state.security.threat_gate_radius_m,
-            "threat_coverage_region_ids": sorted(state.security.threat_coverage_region_ids),
-            "threat_incomplete_region_ids": sorted(state.security.threat_incomplete_region_ids),
-        },
+        "security": security_policy_to_dict(state.security),
         "completed_contract_ids": list(state.completed_contract_ids),
         "active_shipments": [
             {
-                "contract": contract_to_dict(item.contract.contract),
+                "contract": contract_to_dict(item.contract),
                 "origin_system_id": item.contract.origin_system_id,
                 "destination_system_id": item.contract.destination_system_id,
                 "deadline": item.deadline.isoformat(),
@@ -425,131 +366,76 @@ def execution_state_to_dict(state: ExecutionState) -> dict[str, Any]:
     }
 
 
-def execution_state_from_dict(payload: dict[str, Any]) -> ExecutionState:
-    if payload.get("schema_version") not in {1, 2, EXECUTION_STATE_SCHEMA_VERSION}:
+def execution_state_from_dict(payload: dict[str, object]) -> ExecutionState:
+    schema_version = json_int(payload.get("schema_version"), "execution schema_version")
+    if schema_version not in {1, 2, EXECUTION_STATE_SCHEMA_VERSION}:
         raise ValueError("unsupported execution-state schema")
-    raw_travel = cast(dict[str, Any], payload["travel"])
-    raw_security = cast(dict[str, Any], payload["security"])
-    raw_active = cast(list[Any], payload.get("active_shipments", []))
-    raw_completed = cast(list[Any], payload.get("completed_contract_ids", []))
+    raw_travel = json_object(payload["travel"], "travel")
+    raw_security = json_object(payload["security"], "security")
+    raw_active = json_array(payload.get("active_shipments", []), "active_shipments")
+    raw_completed = json_array(payload.get("completed_contract_ids", []), "completed_contract_ids")
     active: list[ActiveShipment] = []
     for item in raw_active:
         if not isinstance(item, dict):
             raise ValueError("active shipment must be an object")
-        row = cast(dict[str, Any], item)
-        public = contract_from_dict(cast(dict[str, Any], row["contract"]))
+        row = cast(dict[str, object], item)
+        public = contract_from_dict(json_object(row["contract"], "active contract"))
         active.append(
             ActiveShipment(
-                contract=RoutableContract(
+                contract=RoutableContract.resolve(
                     public,
-                    int(row["origin_system_id"]),
-                    int(row["destination_system_id"]),
+                    json_int(row["origin_system_id"], "origin_system_id"),
+                    json_int(row["destination_system_id"], "destination_system_id"),
                 ),
-                deadline=parse_esi_datetime(str(row["deadline"])),
-                picked=bool(row["picked"]),
+                deadline=parse_esi_datetime(json_string(row["deadline"], "deadline")),
+                picked=json_bool(row["picked"], "picked"),
             )
         )
-    minimum_security_raw = raw_security.get("minimum_security")
-    minimum_security = None if minimum_security_raw is None else float(minimum_security_raw)
-    raw_allowed_bands = raw_security.get("allowed_bands")
-    allowed_bands = (
-        None
-        if raw_allowed_bands is None
-        else frozenset(SecurityBand(str(item)) for item in cast(list[Any], raw_allowed_bands))
-    )
-    raw_gank_threshold = raw_security.get("gank_ship_kill_threshold")
-    raw_gank_time = raw_security.get("gank_activity_fetched_at")
-    raw_threat_time = raw_security.get("threat_intel_fetched_at")
     return ExecutionState(
-        current_time=parse_esi_datetime(str(payload["current_time"])),
-        session_deadline=parse_esi_datetime(str(payload["session_deadline"])),
-        current_system_id=int(payload["current_system_id"]),
-        cargo_capacity_units=int(payload["cargo_capacity_units"]),
-        collateral_budget_units=int(payload["collateral_budget_units"]),
-        collateral_mode=CollateralMode(str(payload["collateral_mode"])),
+        current_time=parse_esi_datetime(json_string(payload["current_time"], "current_time")),
+        session_deadline=parse_esi_datetime(
+            json_string(payload["session_deadline"], "session_deadline")
+        ),
+        current_system_id=json_int(payload["current_system_id"], "current_system_id"),
+        cargo_capacity_units=json_int(payload["cargo_capacity_units"], "cargo_capacity_units"),
+        collateral_budget_units=json_int(
+            payload["collateral_budget_units"], "collateral_budget_units"
+        ),
+        collateral_mode=CollateralMode(json_string(payload["collateral_mode"], "collateral_mode")),
         travel=TravelTimeModel(
-            seconds_per_jump=int(raw_travel["seconds_per_jump"]),
-            service_seconds=int(raw_travel["service_seconds"]),
+            seconds_per_jump=json_int(raw_travel["seconds_per_jump"], "seconds_per_jump"),
+            service_seconds=json_int(raw_travel["service_seconds"], "service_seconds"),
         ),
-        security=SecurityPolicy(
-            minimum_security=minimum_security,
-            avoided_system_ids=frozenset(
-                int(item) for item in cast(list[Any], raw_security.get("avoided_system_ids", []))
-            ),
-            allowed_bands=allowed_bands,
-            gank_avoided_system_ids=frozenset(
-                int(item)
-                for item in cast(list[Any], raw_security.get("gank_avoided_system_ids", []))
-            ),
-            gank_ship_kill_threshold=(
-                int(raw_gank_threshold) if raw_gank_threshold is not None else None
-            ),
-            gank_activity_fetched_at=(
-                parse_esi_datetime(str(raw_gank_time)) if raw_gank_time else None
-            ),
-            threat_avoided_system_ids=frozenset(
-                int(item)
-                for item in cast(list[Any], raw_security.get("threat_avoided_system_ids", []))
-            ),
-            threat_categories=frozenset(
-                ThreatCategory(str(item))
-                for item in cast(list[Any], raw_security.get("threat_categories", []))
-            ),
-            threat_min_events=(
-                int(raw_security["threat_min_events"])
-                if raw_security.get("threat_min_events") is not None
-                else None
-            ),
-            threat_intel_fetched_at=(
-                parse_esi_datetime(str(raw_threat_time)) if raw_threat_time else None
-            ),
-            threat_window_seconds=(
-                int(raw_security["threat_window_seconds"])
-                if raw_security.get("threat_window_seconds") is not None
-                else None
-            ),
-            threat_gate_radius_m=(
-                int(raw_security["threat_gate_radius_m"])
-                if raw_security.get("threat_gate_radius_m") is not None
-                else None
-            ),
-            threat_coverage_region_ids=frozenset(
-                int(item)
-                for item in cast(list[Any], raw_security.get("threat_coverage_region_ids", []))
-            ),
-            threat_incomplete_region_ids=frozenset(
-                int(item)
-                for item in cast(list[Any], raw_security.get("threat_incomplete_region_ids", []))
-            ),
-        ),
+        security=security_policy_from_dict(raw_security),
         terminal_system_id=(
-            int(payload["terminal_system_id"])
+            json_int(payload["terminal_system_id"], "terminal_system_id")
             if payload.get("terminal_system_id") is not None
             else None
         ),
         remaining_required_system_ids=frozenset(
-            int(item) for item in cast(list[Any], payload.get("remaining_required_system_ids", []))
+            json_int(item, "array entry")
+            for item in json_array(
+                payload.get("remaining_required_system_ids", []), "remaining_required_system_ids"
+            )
         ),
         max_simultaneous_contracts=(
-            int(payload["max_simultaneous_contracts"])
+            json_int(payload["max_simultaneous_contracts"], "max_simultaneous_contracts")
             if payload.get("max_simultaneous_contracts") is not None
             else None
         ),
         active_shipments=tuple(active),
-        completed_contract_ids=tuple(int(item) for item in raw_completed),
+        completed_contract_ids=tuple(
+            json_int(item, "completed contract ID") for item in raw_completed
+        ),
     )
 
 
 def write_execution_state(path: Path, state: ExecutionState) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    serialized = json.dumps(execution_state_to_dict(state), indent=2, sort_keys=True) + "\n"
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(serialized, encoding="utf-8")
-    temporary.replace(path)
+    write_json(path, execution_state_to_dict(state))
 
 
 def read_execution_state(path: Path) -> ExecutionState:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("execution-state root must be an object")
-    return execution_state_from_dict(cast(dict[str, Any], payload))
+    try:
+        return execution_state_from_dict(read_json_object(path))
+    except KeyError as error:
+        raise ValueError(f"{path}: missing required field {error.args[0]!r}") from error

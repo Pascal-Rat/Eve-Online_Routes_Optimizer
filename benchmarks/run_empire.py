@@ -26,8 +26,9 @@ from eve_courier_optimizer.domain import (
 )
 from eve_courier_optimizer.planning import prepare_problem
 from eve_courier_optimizer.sde import UniverseGraph
+from eve_courier_optimizer.search_config import SolverConfig
 from eve_courier_optimizer.snapshot import ContractSnapshot, read_snapshot
-from eve_courier_optimizer.solver import SolverConfig, solve_exact
+from eve_courier_optimizer.solver import solve_exact
 from eve_courier_optimizer.threat_intel import threat_avoided_systems
 
 FIXTURE = Path(__file__).with_name("empire_snapshot_2026-08-06.json")
