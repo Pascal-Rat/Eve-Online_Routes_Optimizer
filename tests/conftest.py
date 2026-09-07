@@ -4,9 +4,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from eve_courier_optimizer.domain import PublicCourierContract
-from eve_courier_optimizer.sde import Region, SdeMetadata, SolarSystem, UniverseGraph
-from eve_courier_optimizer.snapshot import ContractSnapshot
+from eve_courier_optimizer.domain import ContractSnapshot, PublicCourierContract
+from eve_courier_optimizer.routing.universe import Region, SdeMetadata, SolarSystem, UniverseGraph
 
 
 @pytest.fixture

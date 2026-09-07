@@ -34,8 +34,8 @@ def test_nonfinite_values_cannot_replace_an_artifact(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("version", [True, 1.0, "1", None, []])
 def test_artifact_schema_requires_an_integer(version: object) -> None:
-    from eve_courier_optimizer.execution import execution_state_from_dict
-    from eve_courier_optimizer.snapshot import snapshot_from_dict
+    from eve_courier_optimizer.application.execution import execution_state_from_dict
+    from eve_courier_optimizer.eve.snapshot import snapshot_from_dict
 
     for decode in (execution_state_from_dict, snapshot_from_dict):
         with pytest.raises(ValueError, match="schema_version must be an integer"):

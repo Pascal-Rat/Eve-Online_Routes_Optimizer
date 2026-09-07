@@ -15,6 +15,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from eve_courier_optimizer.domain import (
+    ContractSnapshot,
     PlanningConstraints,
     ProofStatus,
     SecurityBand,
@@ -24,12 +25,11 @@ from eve_courier_optimizer.domain import (
     cargo_capacity_to_units,
     isk_to_units,
 )
-from eve_courier_optimizer.planning import prepare_problem
-from eve_courier_optimizer.sde import UniverseGraph
-from eve_courier_optimizer.search_config import SolverConfig
-from eve_courier_optimizer.snapshot import ContractSnapshot, read_snapshot
-from eve_courier_optimizer.solver import solve_exact
-from eve_courier_optimizer.threat_intel import threat_avoided_systems
+from eve_courier_optimizer.eve.snapshot import read_snapshot
+from eve_courier_optimizer.optimization import RouteOptimizer, SolverConfig
+from eve_courier_optimizer.routing.policy import threat_avoided_systems
+from eve_courier_optimizer.routing.preparation import prepare_problem
+from eve_courier_optimizer.routing.universe import UniverseGraph
 
 FIXTURE = Path(__file__).with_name("empire_snapshot_2026-08-06.json")
 FROZEN_SDE = Path(__file__).with_name("empire_sde_3458726.sqlite3.gz")
@@ -164,7 +164,7 @@ def run_empire_profile(
             f"{profile.name} baseline changed: expected {profile.expected_eligible} eligible "
             f"contracts, got {eligible}"
         )
-    solved = solve_exact(
+    solved = RouteOptimizer(
         prepared,
         graph,
         config=SolverConfig(
@@ -172,7 +172,7 @@ def run_empire_profile(
             num_workers=workers,
             minimize_finish_time_after_proof=False,
         ),
-    )
+    ).solve()
     certificate = solved.certificate
     return EmpireBenchmarkResult(
         profile=profile.name,

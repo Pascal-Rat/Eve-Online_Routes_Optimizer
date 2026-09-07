@@ -11,17 +11,15 @@ import time
 from importlib.metadata import version
 from pathlib import Path
 
-from eve_courier_optimizer import solver
-from eve_courier_optimizer.bounds import (
+import eve_courier_optimizer
+from benchmarks.run_stress import CASES, prepare_case
+from eve_courier_optimizer.optimization.certificate import canonical_problem_sha256
+from eve_courier_optimizer.optimization.events import EventModel
+from eve_courier_optimizer.optimization.relaxation import (
+    SystemRelaxationMaster,
     build_selection_cuts,
-    build_system_relaxation_master,
-    hint_system_relaxation_master,
 )
-from eve_courier_optimizer.construction import construct_incumbent
-from eve_courier_optimizer.event_model import EventModel
-from eve_courier_optimizer.proof import canonical_problem_sha256
-
-from .run_stress import CASES, prepare_case
+from eve_courier_optimizer.optimization.routes import construct_incumbent
 
 
 def peak_resident_bytes() -> int | None:
@@ -46,7 +44,7 @@ def measure(case: str, *, seed: int) -> dict[str, object]:
     cuts = build_selection_cuts(prepared)
     selection = time.perf_counter() - started
     started = time.perf_counter()
-    master = build_system_relaxation_master(prepared, selection_cuts=cuts)
+    master = SystemRelaxationMaster(prepared, selection_cuts=cuts)
     master_seconds = time.perf_counter() - started
     started = time.perf_counter()
     route = EventModel(prepared)
@@ -79,8 +77,7 @@ def measure(case: str, *, seed: int) -> dict[str, object]:
     }
     started = time.perf_counter()
     route.hint(simulation.visits, incumbent.selected_contract_ids)
-    hint_system_relaxation_master(
-        master,
+    master.hint(
         incumbent.selected_contract_ids,
         tuple(leg.to_system_id for leg in simulation.travel_legs),
         simulation.total_reward_units,
@@ -100,7 +97,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.repeat < 1:
         parser.error("--repeat must be positive")
-    source_root = Path(solver.__file__).parent
+    source_root = Path(eve_courier_optimizer.__file__).parent
     digest = hashlib.sha256()
     for source in sorted(source_root.rglob("*.py")):
         digest.update(str(source.relative_to(source_root)).encode() + b"\0")

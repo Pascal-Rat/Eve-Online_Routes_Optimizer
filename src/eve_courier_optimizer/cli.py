@@ -8,8 +8,35 @@ from datetime import UTC, datetime
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
 
+from eve_courier_optimizer.application.execution import (
+    extend_execution_horizon,
+    read_execution_state,
+    record_delivery,
+    record_pickup,
+    record_route_system,
+    write_execution_state,
+)
+from eve_courier_optimizer.application.plan_output import write_solve_result
+from eve_courier_optimizer.application.planner import CourierPlanner
+from eve_courier_optimizer.desktop.server import run_local_web_ui
+from eve_courier_optimizer.desktop.session import default_web_workspace
+from eve_courier_optimizer.eve.esi import EsiClient, default_cache_path
+from eve_courier_optimizer.eve.http import ResponseCache
+from eve_courier_optimizer.eve.scan import DEFAULT_CONTRACT_SCAN_WORKERS, MAX_CONTRACT_SCAN_WORKERS
+from eve_courier_optimizer.eve.snapshot import read_snapshot, write_snapshot
+from eve_courier_optimizer.eve.zkill import (
+    DEFAULT_THREAT_WINDOW_SECONDS,
+    ZkillClient,
+    default_zkill_cache_path,
+)
+from eve_courier_optimizer.optimization import SolverConfig
+from eve_courier_optimizer.routing.policy import observed_security_policy
+from eve_courier_optimizer.routing.preparation import rank_single_contracts
+from eve_courier_optimizer.routing.universe import UniverseGraph, load_bundled_graph
+
 from .domain import (
     CollateralMode,
+    ContractSnapshot,
     PlanningConstraints,
     ProofStatus,
     SecurityBand,
@@ -21,34 +48,6 @@ from .domain import (
     isk_units_to_decimal,
     parse_human_isk,
 )
-from .esi import EsiClient, default_cache_path
-from .execution import (
-    extend_execution_horizon,
-    read_execution_state,
-    record_delivery,
-    record_pickup,
-    record_route_system,
-    write_execution_state,
-)
-from .http import ResponseCache
-from .planning import rank_single_contracts
-from .reporting import write_solve_result
-from .route_policy import observed_security_policy
-from .scanner import (
-    DEFAULT_CONTRACT_SCAN_WORKERS,
-    MAX_CONTRACT_SCAN_WORKERS,
-)
-from .sde import UniverseGraph, load_bundled_graph
-from .search_config import SolverConfig
-from .service import PlannerService
-from .session import default_web_workspace
-from .snapshot import ContractSnapshot, read_snapshot, write_snapshot
-from .threat_intel import (
-    DEFAULT_THREAT_WINDOW_SECONDS,
-    ZkillClient,
-    default_zkill_cache_path,
-)
-from .webapp import run_local_web_ui
 
 
 def _positive_decimal(value: str) -> Decimal:
@@ -278,7 +277,7 @@ def _run_scan(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
     cache = ResponseCache(arguments.cache)
     client = EsiClient(cache=cache)
     zkill = ZkillClient(cache=ResponseCache(arguments.zkill_cache))
-    snapshot = PlannerService(graph, client, zkill).scan(
+    snapshot = CourierPlanner(graph, client, zkill).scan(
         region_ids,
         include_threat_intel=arguments.threat_intel,
         threat_window_seconds=arguments.threat_window_hours * 3_600,
@@ -297,7 +296,7 @@ def _run_scan(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
 def _run_rank(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
     snapshot = read_snapshot(arguments.snapshot)
     constraints = _constraints(graph, arguments, snapshot)
-    prepared = PlannerService(graph, EsiClient()).prepare(
+    prepared = CourierPlanner(graph, EsiClient()).prepare(
         snapshot,
         constraints,
         max_candidates=arguments.max_candidates,
@@ -337,8 +336,8 @@ def _print_solve_summary(result_path: Path, result_status: ProofStatus, result: 
 def _run_solve(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
     snapshot = read_snapshot(arguments.snapshot)
     constraints = _constraints(graph, arguments, snapshot)
-    service = PlannerService(graph, EsiClient())
-    plan = service.solve(
+    planner = CourierPlanner(graph, EsiClient())
+    plan = planner.solve(
         snapshot,
         constraints,
         max_candidates=arguments.max_candidates,
@@ -350,7 +349,7 @@ def _run_solve(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
         departure = (
             _parse_time("now") if arguments.planning_time == "now" else constraints.snapshot_time
         )
-        state = service.arm(plan, at=departure)
+        state = planner.arm(plan, at=departure)
         write_execution_state(arguments.state_output, state)
     _print_solve_summary(arguments.output, result.certificate.status, result)
     if result.certificate.objective_units is not None:
@@ -370,9 +369,9 @@ def _run_solve(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
 def _run_replan(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
     snapshot = read_snapshot(arguments.snapshot)
     state = read_execution_state(arguments.state)
-    service = PlannerService(graph, EsiClient())
+    planner = CourierPlanner(graph, EsiClient())
     at = None if arguments.planning_time == "snapshot" else _parse_time(arguments.planning_time)
-    plan = service.replan(
+    plan = planner.replan(
         snapshot,
         state,
         at=at,
@@ -382,7 +381,7 @@ def _run_replan(arguments: argparse.Namespace, graph: UniverseGraph) -> int:
     prepared, result = plan.prepared, plan.result
     write_solve_result(arguments.output, result, prepared.problem)
     if arguments.state_output is not None and result.certificate.feasibility_verified:
-        next_state = service.arm(
+        next_state = planner.arm(
             plan,
             at=(
                 _parse_time("now")

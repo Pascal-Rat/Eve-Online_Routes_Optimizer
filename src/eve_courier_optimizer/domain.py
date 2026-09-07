@@ -282,6 +282,69 @@ class PublicCourierContract:
         return (microseconds - 1) // 1_000_000
 
 
+@dataclass(frozen=True, slots=True)
+class ContractSnapshot:
+    fetched_at: datetime
+    compatibility_date: str
+    sde_build_number: int
+    region_ids: tuple[int, ...]
+    contracts: tuple[PublicCourierContract, ...]
+    system_kills_fetched_at: datetime | None = None
+    system_kill_activity: tuple[SystemKillActivity, ...] = ()
+    threat_intel_fetched_at: datetime | None = None
+    threat_window_seconds: int | None = None
+    threat_gate_radius_m: int | None = None
+    threat_coverage_region_ids: tuple[int, ...] = ()
+    threat_incomplete_region_ids: tuple[int, ...] = ()
+    threat_killmails_seen: int = 0
+    gate_threat_events: tuple[GateThreatEvent, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.fetched_at.tzinfo is None:
+            raise ValueError("snapshot time must be timezone-aware")
+        if self.system_kills_fetched_at is not None and self.system_kills_fetched_at.tzinfo is None:
+            raise ValueError("system-kill activity time must be timezone-aware")
+        if self.system_kill_activity and self.system_kills_fetched_at is None:
+            raise ValueError("system-kill activity requires its fetched-at timestamp")
+        if self.threat_intel_fetched_at is not None and self.threat_intel_fetched_at.tzinfo is None:
+            raise ValueError("threat-intel time must be timezone-aware")
+        if self.threat_killmails_seen < 0:
+            raise ValueError("threat killmail count cannot be negative")
+        if self.threat_window_seconds is not None and self.threat_window_seconds <= 0:
+            raise ValueError("threat-intel window must be positive")
+        if self.threat_gate_radius_m is not None and self.threat_gate_radius_m < 0:
+            raise ValueError("threat-intel gate radius cannot be negative")
+        threat_payload_present = bool(
+            self.gate_threat_events
+            or self.threat_coverage_region_ids
+            or self.threat_incomplete_region_ids
+            or self.threat_killmails_seen
+        )
+        if threat_payload_present and self.threat_intel_fetched_at is None:
+            raise ValueError("threat-intel payload requires its fetched-at timestamp")
+        if self.threat_intel_fetched_at is not None and (
+            self.threat_window_seconds is None or self.threat_gate_radius_m is None
+        ):
+            raise ValueError("threat-intel timestamp requires window and gate radius")
+        contract_ids = [contract.contract_id for contract in self.contracts]
+        if len(contract_ids) != len(set(contract_ids)):
+            raise ValueError("snapshot contract IDs must be unique")
+        activity_system_ids = [item.system_id for item in self.system_kill_activity]
+        if len(activity_system_ids) != len(set(activity_system_ids)):
+            raise ValueError("system-kill activity IDs must be unique")
+        killmail_ids = [item.killmail_id for item in self.gate_threat_events]
+        if len(killmail_ids) != len(set(killmail_ids)):
+            raise ValueError("gate-threat killmail IDs must be unique")
+        for label, region_values in (
+            ("coverage", self.threat_coverage_region_ids),
+            ("incomplete", self.threat_incomplete_region_ids),
+        ):
+            if any(region_id <= 0 for region_id in region_values):
+                raise ValueError(f"threat {label} region IDs must be positive")
+            if len(region_values) != len(set(region_values)):
+                raise ValueError(f"threat {label} region IDs must be unique")
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RoutableContract(PublicCourierContract):
     """A public courier whose NPC station endpoints have been resolved in the SDE."""

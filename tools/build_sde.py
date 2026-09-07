@@ -7,7 +7,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from eve_courier_optimizer.sde_build import (
+from eve_courier_optimizer.eve.sde_build import (
     LatestBuild,
     build_route_database,
     download_sde,

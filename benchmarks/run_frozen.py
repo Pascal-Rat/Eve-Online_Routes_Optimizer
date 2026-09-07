@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from eve_courier_optimizer.domain import (
+    ContractSnapshot,
     GateEvidence,
     GateThreatEvent,
     PlanningConstraints,
@@ -25,12 +26,10 @@ from eve_courier_optimizer.domain import (
     isk_to_units,
     parse_esi_datetime,
 )
-from eve_courier_optimizer.planning import prepare_problem
-from eve_courier_optimizer.sde import Region, SdeMetadata, SolarSystem, UniverseGraph
-from eve_courier_optimizer.search_config import SolverConfig
-from eve_courier_optimizer.snapshot import ContractSnapshot
-from eve_courier_optimizer.solver import solve_exact
-from eve_courier_optimizer.threat_intel import threat_avoided_systems
+from eve_courier_optimizer.optimization import RouteOptimizer, SolverConfig
+from eve_courier_optimizer.routing.policy import threat_avoided_systems
+from eve_courier_optimizer.routing.preparation import prepare_problem
+from eve_courier_optimizer.routing.universe import Region, SdeMetadata, SolarSystem, UniverseGraph
 
 FIXTURE = Path(__file__).with_name("frozen_universe.json")
 
@@ -180,7 +179,7 @@ def run_benchmark_scenarios(*, time_limit_seconds: float = 15.0) -> tuple[Benchm
         )
         started = time.perf_counter()
         prepared = prepare_problem(snapshot, graph, constraints)
-        solved = solve_exact(
+        solved = RouteOptimizer(
             prepared,
             graph,
             config=SolverConfig(
@@ -188,7 +187,7 @@ def run_benchmark_scenarios(*, time_limit_seconds: float = 15.0) -> tuple[Benchm
                 num_workers=1,
                 minimize_finish_time_after_proof=False,
             ),
-        )
+        ).solve()
         elapsed = time.perf_counter() - started
         results.append(
             BenchmarkResult(

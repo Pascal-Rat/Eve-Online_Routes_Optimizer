@@ -10,31 +10,41 @@ python3.12 -m venv .venv
 
 ## Find the code
 
-All Python application modules are in `src/eve_courier_optimizer`.
+Start with [`CourierPlanner`](src/eve_courier_optimizer/application/planner.py) for the product
+workflow and [`RouteOptimizer.solve`](src/eve_courier_optimizer/optimization/optimizer.py) for the
+search. The CLI and desktop session both use the same planner.
 
-| Responsibility | Entry points |
-| --- | --- |
-| Contracts, constraints, route events and certificates | `domain.py` |
-| SDE graph, permitted shortest paths and database build | `sde.py`, `sde_build.py` |
-| Public observations | `scanner.py`, `esi.py`, `threat_intel.py`; shared transport/cache in `http.py` |
-| Observed route policy and preparation | `route_policy.py`, `planning.py` |
-| Search orchestration and budgets | `solver.py`, `search_config.py` |
-| Complete mathematical model | `event_model.py` |
-| Master, exact selection checks and strengthening | `decomposition.py`, `bounds.py`, `subset_search.py`, `batch_search.py` |
-| Verified constructive incumbents | `construction.py` |
-| Independent replay and exhaustive reference | `verification.py`, `reference_solver.py` |
-| Accepted commitments and transitions | `execution.py` |
-| Shared scan/solve/replan/arm workflow | `service.py` |
-| Durable local session and cancellable jobs | `session.py`, `jobs.py` |
-| CLI and HTTP boundaries | `cli.py`, `webapp.py`, `web_options.py` |
-| Serialization and display | `snapshot.py`, `reporting.py`, `presentation.py`, `jsonio.py` |
-| Browser controller, form, route display and autocomplete | `web/app.js`, `planner_form.js`, `route_view.js`, `autocomplete.js` |
+| Package | Owns | Entry point |
+| --- | --- | --- |
+| `application` | Scan, plan, replan, arm and accepted-contract execution | `CourierPlanner` |
+| `desktop` | Local HTTP API, browser assets, durable session and cancellable jobs | `server.py`, `PlanningSession` |
+| `eve` | ESI/zKill observations, snapshot files, HTTP cache and SDE acquisition | `scan.py`, `esi.py`, `zkill.py` |
+| `routing` | Permitted graph paths, problem preparation and independent route replay | `UniverseGraph`, `prepare_problem`, `simulate_and_verify` |
+| `optimization` | Reward search, mathematical models, bounds and proof certificates | `RouteOptimizer`, `SolverConfig` |
 
-The main flow is observation → policy/constraints → prepared problem → search → independent replay
-→ plan. `RoutePlan` keeps a prepared input together with its result. Arming turns a revalidated plan
-into execution state; replanning combines a fresh observation with those persistent obligations.
-Search never calls external APIs. Graph topology is immutable to callers; query caches are bounded
-and discarded when a graph crosses the spawned-worker boundary.
+```mermaid
+flowchart TD
+    cli[CLI] --> application[application]
+    desktop[desktop] --> application
+    application --> eve[eve]
+    application --> optimization[optimization]
+    application --> routing[routing]
+    eve --> routing
+    optimization --> routing
+```
+
+`domain.py` contains the shared immutable contracts, observations, route requirements and results.
+Routing has no network or solver dependency. Application and desktop code use the public optimizer
+entry point; its selection loop, model constraints and route checks stay inside `optimization`.
+Tests mirror these packages, and `tests/test_architecture.py` enforces their dependency boundaries.
+
+`RouteOptimizer` first builds a verified route, then runs `ContractSelectionSearch`. That search owns
+its incumbent, bounds, learned conflicts and budget. Its `SystemRelaxationMaster` proposes contract
+sets; exact route checks validate them. Any remaining proof gap proceeds to `EventModel` with the
+accumulated evidence. Route replay stays independent from all these search implementations.
+
+The desktop UI targets windows at least 1024 pixels wide. Python serves its native JavaScript modules
+and static assets directly; there is no frontend build system.
 
 ## Validate
 

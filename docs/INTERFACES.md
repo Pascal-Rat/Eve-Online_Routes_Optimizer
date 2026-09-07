@@ -2,7 +2,7 @@
 
 ## Local API
 
-`webapp.py` owns loopback HTTP and static assets; `session.py` owns the durable planning session.
+`desktop/server.py` owns loopback HTTP and static assets; `session.py` owns the durable planning session.
 The browser uses native ES modules with no frontend build step. Requests are same-origin JSON;
 responses carry either a result or an `error` message. Invalid input returns 400, failed external
 feeds return 502, and internal/storage failures return 500 with server-side diagnostics.

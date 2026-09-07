@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
 from playwright.sync_api import Page, expect
 
-from eve_courier_optimizer.snapshot import write_snapshot
+from browser_tests.conftest import WebSession
+from eve_courier_optimizer.eve.snapshot import write_snapshot
 from tests.conftest import make_contract, make_snapshot
-from tests.test_jobs import SlowTransport
-from tests.test_webapp import planning_payload
-
-from .conftest import WebSession
+from tests.desktop.test_jobs import SlowTransport
+from tests.desktop.test_server import planning_payload
 
 
 def configure(page: Page) -> None:
@@ -158,12 +158,17 @@ def test_autocomplete_ignores_outdated_and_dismissed_results(
     expect(menu).to_be_hidden()
 
 
-def test_mobile_route_scroll_stays_inside_its_table(page: Page, web_session: WebSession) -> None:
+@pytest.mark.parametrize("width", [1024, 1440])
+def test_desktop_keeps_controls_beside_the_route(
+    page: Page, web_session: WebSession, width: int
+) -> None:
     web_session.app.scan({"regions": [10]})
     web_session.app.solve(planning_payload())
-    page.set_viewport_size({"width": 390, "height": 844})
+    page.set_viewport_size({"width": width, "height": 900})
     page.goto(web_session.url)
     expect(page.locator("#route-wrap")).to_be_visible()
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-    table = page.locator("#route-wrap")
-    assert table.evaluate("element => element.scrollWidth > element.clientWidth")
+    controls = page.locator(".controls").bounding_box()
+    results = page.locator(".results").bounding_box()
+    assert controls is not None and results is not None
+    assert controls["x"] + controls["width"] <= results["x"]

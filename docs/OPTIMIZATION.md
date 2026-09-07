@@ -6,7 +6,7 @@ an upper bound. Equality proves the reward optimum; a timeout alone proves nothi
 
 ## Complete event model
 
-`event_model.EventModel` exposes the mathematical structure directly: event catalog, circuit,
+`optimization.events.EventModel` exposes the mathematical structure directly: event catalog, circuit,
 arrival/order/resource variables, contract constraints, reward objective, hints and extraction.
 
 For optional contract `i`, Boolean `x_i` selects both pickup and delivery. Active shipments have
@@ -43,16 +43,16 @@ $$
 
 A redundant total-duration equality telescopes travel plus service across the path. Necessary
 resource-work and incompatibility inequalities strengthen propagation without changing feasibility.
-The event model and system master share these constraints through `bounds.py`.
+The event model and system master share these constraints through `optimization/relaxation.py`.
 
 ## Proof-preserving search
 
-`solver.solve_exact` coordinates these steps and constructs the certificate once:
+`optimization.RouteOptimizer.solve` coordinates these steps and constructs the certificate once:
 
-1. `construction.py` builds and repairs routes. Only independently replayed feasible improvements
+1. `optimization/routes.py` builds and repairs routes. Only independently replayed feasible improvements
    become incumbents. Hints guide search; an incumbent reward floor is valid because its route is
    already known feasible.
-2. For at least 20 optional contracts, `decomposition.py` builds the endpoint-system master and
+2. For at least 20 optional contracts, `optimization/selection.py` builds the endpoint-system master and
    checks its proposed selections with exact searches. Valid bounds and cuts survive every iteration.
 3. If the master remains open, the complete event model receives its bounds, cuts and best
    incumbent, retaining the entire eligible optional pool. If reward is still unproven afterward,
@@ -99,9 +99,9 @@ candidate reduction. Small exhaustive packing and route tests guard their validi
 
 ## Proof interpretation and budgets
 
-Every returned feasible route is replayed by `verification.py`, which recomputes travel, policy,
+Every returned feasible route is replayed by `routing/replay.py`, which recomputes travel, policy,
 precedence, resources, deadlines, required systems and final travel without trusting CP-SAT state.
-For supported small locked problems, the independent exhaustive `reference_solver.py` also checks
+For supported small locked problems, the independent exhaustive `routing/reference.py` also checks
 the reward optimum. It intentionally remains separate from production subset search.
 
 | Certificate | Meaning |

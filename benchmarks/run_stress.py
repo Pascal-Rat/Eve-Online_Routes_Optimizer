@@ -13,26 +13,20 @@ from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from pathlib import Path
 
-from eve_courier_optimizer import solver as solver_module
+import eve_courier_optimizer
+from benchmarks.run_empire import FIXTURE, PROFILES, _constraints, load_empire_graph
 from eve_courier_optimizer.domain import (
     CollateralMode,
+    ContractSnapshot,
     PlanningConstraints,
     PublicCourierContract,
     SecurityPolicy,
     TravelTimeModel,
 )
-from eve_courier_optimizer.planning import PreparedProblem, prepare_problem
-from eve_courier_optimizer.sde import (
-    Region,
-    SdeMetadata,
-    SolarSystem,
-    UniverseGraph,
-)
-from eve_courier_optimizer.search_config import SolverConfig
-from eve_courier_optimizer.snapshot import ContractSnapshot, read_snapshot
-from eve_courier_optimizer.solver import solve_exact
-
-from .run_empire import FIXTURE, PROFILES, _constraints, load_empire_graph
+from eve_courier_optimizer.eve.snapshot import read_snapshot
+from eve_courier_optimizer.optimization import RouteOptimizer, SolverConfig
+from eve_courier_optimizer.routing.preparation import PreparedProblem, prepare_problem
+from eve_courier_optimizer.routing.universe import Region, SdeMetadata, SolarSystem, UniverseGraph
 
 CASES = (
     "empire_dst",
@@ -131,7 +125,7 @@ def main() -> int:
         minimize_finish_time_after_proof=False,
         log_search_progress=args.log,
     )
-    source_root = Path(solver_module.__file__).parent
+    source_root = Path(eve_courier_optimizer.__file__).parent
     source_hash = hashlib.sha256()
     for source in sorted(source_root.rglob("*.py")):
         source_hash.update(str(source.relative_to(source_root)).encode() + b"\0")
@@ -141,11 +135,11 @@ def main() -> int:
         start = time.perf_counter()
         graph, prepared = prepare_case(name, seed=args.seed)
         preparation = time.perf_counter() - start
-        result = solve_exact(
+        result = RouteOptimizer(
             prepared,
             graph,
             config=config,
-        )
+        ).solve()
         c = result.certificate
         row = dict(
             case=name,

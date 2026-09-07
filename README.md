@@ -4,7 +4,8 @@ Choose public courier contracts and their pickup/delivery order together, subjec
 collateral, deadlines and route policy. The optimizer maximizes **gross courier reward** and reports
 an independently verified route, a rigorous reward ceiling, and any remaining optimality gap.
 
-The application runs locally, uses public ESI data and a bundled SDE, and needs no EVE login.
+The application runs locally on a desktop, uses public ESI data and a bundled SDE, and needs no EVE
+login. Its browser interface uses a desktop layout with a minimum window width of 1024 pixels.
 
 ![Planner with a route and its proof certificate](docs/assets/ui-planner.png)
 

@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from eve_courier_optimizer.esi import EsiClient
-from eve_courier_optimizer.sde import UniverseGraph
-from eve_courier_optimizer.session import PlanningSession
-from eve_courier_optimizer.webapp import create_http_server
+from eve_courier_optimizer.desktop.server import create_http_server
+from eve_courier_optimizer.desktop.session import PlanningSession
+from eve_courier_optimizer.eve.esi import EsiClient
+from eve_courier_optimizer.routing.universe import UniverseGraph
 from tests.conftest import tiny_graph as tiny_graph
-from tests.test_live_recovery import MutableClock
-from tests.test_webapp import CourierTransport
+from tests.desktop.test_recovery import MutableClock
+from tests.desktop.test_server import CourierTransport
 
 
 @dataclass
