@@ -24,9 +24,14 @@ from eve_courier_optimizer.domain import (
     ThreatCategory,
     parse_esi_datetime,
 )
+from eve_courier_optimizer.eve.http import (
+    CacheEntry,
+    ResponseCache,
+    Transport,
+    UrllibTransport,
+    retry_delay,
+)
 from eve_courier_optimizer.routing.universe import Stargate, UniverseGraph
-
-from .http import CacheEntry, ResponseCache, Transport, UrllibTransport, retry_delay
 
 ZKILL_BASE_URL: Final = "https://zkillboard.com"
 ZKILL_MAX_PAST_SECONDS: Final = 604_800

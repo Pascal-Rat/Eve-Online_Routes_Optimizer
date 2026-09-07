@@ -10,41 +10,44 @@ python3.12 -m venv .venv
 
 ## Find the code
 
-Start with [`CourierPlanner`](src/eve_courier_optimizer/application/planner.py) for the product
-workflow and [`RouteOptimizer.solve`](src/eve_courier_optimizer/optimization/optimizer.py) for the
-search. The CLI and desktop session both use the same planner.
+The two entry points are [`cli.py`](src/eve_courier_optimizer/cli.py) and
+[`web/server.py`](src/eve_courier_optimizer/web/server.py). Both reach
+[`CourierPlanner`](src/eve_courier_optimizer/application/planner.py) for solving and replanning.
 
-| Package | Owns | Entry point |
-| --- | --- | --- |
-| `application` | Scan, plan, replan, arm and accepted-contract execution | `CourierPlanner` |
-| `desktop` | Local HTTP API, browser assets, durable session and cancellable jobs | `server.py`, `PlanningSession` |
-| `eve` | ESI/zKill observations, snapshot files, HTTP cache and SDE acquisition | `scan.py`, `esi.py`, `zkill.py` |
-| `routing` | Permitted graph paths, problem preparation and independent route replay | `UniverseGraph`, `prepare_problem`, `simulate_and_verify` |
-| `optimization` | Reward search, mathematical models, bounds and proof certificates | `RouteOptimizer`, `SolverConfig` |
+| Responsibility | Code to read |
+| --- | --- |
+| Browser input, saved session, responses | `web/requests.py`, `web/workspace.py`, `web/responses.py` |
+| Accepted contracts and real pickup/delivery progress | `application/courier_trip.py`: `CourierTrip` |
+| ESI/zKill observations and CCP universe data | `eve/contract_scan.py`, `eve/esi.py`, `eve/zkill.py`, `eve/sde_build.py` |
+| Permitted stargate paths and eligible contracts | `routing/universe.py`, `routing/security.py`, `routing/route_problem.py` |
+| Solver workflow and budgets | `optimization/optimizer.py`, `optimization/solver_config.py` |
+| Mathematical variables, objective and constraints | `optimization/models/`: pickup/delivery, system tour, selection bounds |
+| Incumbent construction and exact selection searches | `optimization/search/` |
+| Independent feasibility and small-instance optimality checks | `verification/route_replay.py`, `verification/exhaustive_optimum.py` |
 
 ```mermaid
-flowchart TD
-    cli[CLI] --> application[application]
-    desktop[desktop] --> application
-    application --> eve[eve]
-    application --> optimization[optimization]
-    application --> routing[routing]
-    eve --> routing
-    optimization --> routing
+flowchart LR
+    request[PlanRequest] --> constraints[PlanningConstraints]
+    snapshot[ContractSnapshot] --> problem[RouteProblem.from_snapshot]
+    constraints --> problem
+    problem --> optimizer[RouteOptimizer.solve]
+    optimizer --> plan[RoutePlan]
+    plan --> departure[CourierPlanner.arm]
+    departure --> trip[CourierTrip]
+    trip --> replan[CourierPlanner.replan]
+    replan --> problem
 ```
 
-`domain.py` contains the shared immutable contracts, observations, route requirements and results.
-Routing has no network or solver dependency. Application and desktop code use the public optimizer
-entry point; its selection loop, model constraints and route checks stay inside `optimization`.
-Tests mirror these packages, and `tests/test_architecture.py` enforces their dependency boundaries.
+`domain.py` defines shared immutable contracts, observations, constraints and results. `RouteProblem`
+owns the eligible pool, mandatory shipments, distances and exclusion scope. The optimizer consumes
+that problem; its models receive search hints explicitly. `CourierTrip` owns progress transitions,
+while `trip_file.py` and `plan_file.py` own the versioned files. `PlanningWorkspace` saves the current
+snapshot, proposed plan and trip for the local HTTP interface.
 
-`RouteOptimizer` first builds a verified route, then runs `ContractSelectionSearch`. That search owns
-its incumbent, bounds, learned conflicts and budget. Its `SystemRelaxationMaster` proposes contract
-sets; exact route checks validate them. Any remaining proof gap proceeds to `EventModel` with the
-accumulated evidence. Route replay stays independent from all these search implementations.
-
-The desktop UI targets windows at least 1024 pixels wide. Python serves its native JavaScript modules
-and static assets directly; there is no frontend build system.
+Models do not call search algorithms. Independent verification does not import the optimizer or
+external clients. Tests enforce these dependency boundaries and follow the same package structure.
+The browser uses native JavaScript modules served directly from `web/assets`; it targets desktop
+windows at least 1024 pixels wide and has no frontend build step.
 
 ## Validate
 
@@ -72,8 +75,8 @@ remain explicit and mark proof scope. An infeasible core needs an actual infeasi
 relaxation incumbent must never be reported as a reward ceiling.
 
 Keep independent verification independent: do not share solver state propagation or production
-search with the reference implementation. New mathematical inputs belong in the problem fingerprint
-and persisted model. Preserve accepted-state compatibility when modifying artifact schemas.
+search with the exhaustive checker. New mathematical inputs belong in the problem fingerprint
+and persisted model. Preserve accepted-state compatibility when modifying file schemas.
 
 [Domain rules](docs/DOMAIN.md), [optimization](docs/OPTIMIZATION.md), and
 [interfaces](docs/INTERFACES.md) document the non-obvious contracts. Keep explanations there concise;

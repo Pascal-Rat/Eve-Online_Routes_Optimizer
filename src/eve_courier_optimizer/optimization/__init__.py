@@ -1,6 +1,6 @@
-"""Optimize a prepared route through the RouteOptimizer entry point."""
+"""Optimize a courier route through the RouteOptimizer entry point."""
 
-from .config import SolverConfig
-from .optimizer import RouteOptimizer
+from eve_courier_optimizer.optimization.optimizer import RouteOptimizer
+from eve_courier_optimizer.optimization.solver_config import SolverConfig
 
 __all__ = ["RouteOptimizer", "SolverConfig"]

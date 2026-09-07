@@ -8,15 +8,19 @@ import pytest
 from ortools.sat.python import cp_model
 
 from eve_courier_optimizer.domain import ActiveShipment, CollateralMode, TravelTimeModel
-from eve_courier_optimizer.optimization.events import EventModel
-from eve_courier_optimizer.optimization.relaxation import SubsetRewardCut, add_subset_reward_cut
-from eve_courier_optimizer.optimization.subsets import solve_subset
-from eve_courier_optimizer.routing.preparation import prepare_problem
-from eve_courier_optimizer.routing.reference import solve_reference
-from eve_courier_optimizer.routing.replay import simulate_and_verify
+from eve_courier_optimizer.optimization.models.pickup_delivery import PickupDeliveryModel
+from eve_courier_optimizer.optimization.models.selection_bounds import (
+    SubsetRewardCut,
+    add_subset_reward_cut,
+)
+from eve_courier_optimizer.optimization.search.route_insertion import build_greedy_route_hint
+from eve_courier_optimizer.optimization.search.subset_search import solve_subset
+from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.universe import UniverseGraph
+from eve_courier_optimizer.verification.exhaustive_optimum import solve_exhaustively
+from eve_courier_optimizer.verification.route_replay import simulate_and_verify
 from tests.conftest import make_contract, make_snapshot
-from tests.optimization.test_relaxation import constraints
+from tests.optimization.test_reward_bounds import constraints
 
 
 def test_subset_search_matches_independent_reference_and_verifies_witnesses(
@@ -46,32 +50,27 @@ def test_subset_search_matches_independent_reference_and_verifies_witnesses(
             finish_system_id=3 if case % 3 == 1 else None,
             max_simultaneous_contracts=rng.choice((None, 1, 2)),
         )
-        p = prepare_problem(make_snapshot(now, *items), tiny_graph, c)
+        p = RouteProblem.from_snapshot(make_snapshot(now, *items), tiny_graph, c)
         answer = solve_subset(p, max_time_seconds=3)
         assert answer is not None and answer.complete
         assert (
-            answer.objective_units == answer.upper_bound_units == solve_reference(p).objective_units
+            answer.objective_units
+            == answer.upper_bound_units
+            == solve_exhaustively(p).objective_units
         )
-        simulation = simulate_and_verify(
-            p.problem, tiny_graph, answer.visits, answer.selected_contract_ids
-        )
+        simulation = simulate_and_verify(p, tiny_graph, answer.visits, answer.selected_contract_ids)
         assert simulation.report.valid and simulation.total_reward_units == answer.objective_units
         if answer.infeasible_core_ids:
             core = set(answer.infeasible_core_ids)
             for removed in (None, *core):
                 subset = replace(
                     p,
-                    problem=replace(
-                        p.problem,
-                        contracts=tuple(
-                            i
-                            for i in p.problem.contracts
-                            if i.contract_id in core and i.contract_id != removed
-                        ),
+                    contracts=tuple(
+                        i for i in p.contracts if i.contract_id in core and i.contract_id != removed
                     ),
                 )
-                feasible = solve_reference(subset).objective_units == sum(
-                    i.reward_units for i in subset.problem.contracts
+                feasible = solve_exhaustively(subset).objective_units == sum(
+                    i.reward_units for i in subset.contracts
                 )
                 assert feasible == (removed is not None)
 
@@ -103,18 +102,16 @@ def test_subset_search_rolling_expiry_matches_event_model(
             return_to_start=case % 2 == 0,
             max_simultaneous_contracts=2,
         )
-        p = prepare_problem(make_snapshot(now, *items), tiny_graph, c)
+        p = RouteProblem.from_snapshot(make_snapshot(now, *items), tiny_graph, c)
         answer = solve_subset(p, max_time_seconds=3)
         assert answer is not None and answer.complete
-        route = EventModel(p)
+        route = PickupDeliveryModel(p, selection_hint=build_greedy_route_hint(p))
         cp = cp_model.CpSolver()
         cp.parameters.num_search_workers = 1
         cp.parameters.max_time_in_seconds = 3
         assert cp.solve(route.model) == cp_model.OPTIMAL
         assert answer.upper_bound_units == cp.value(route.total_reward_units)
-        simulation = simulate_and_verify(
-            p.problem, tiny_graph, answer.visits, answer.selected_contract_ids
-        )
+        simulation = simulate_and_verify(p, tiny_graph, answer.visits, answer.selected_contract_ids)
         assert simulation.report.valid and simulation.total_reward_units == answer.objective_units
 
 
@@ -122,7 +119,7 @@ def test_subset_limits_never_convert_an_incumbent_into_a_ceiling(
     now: datetime,
     tiny_graph: UniverseGraph,
 ) -> None:
-    p = prepare_problem(
+    p = RouteProblem.from_snapshot(
         make_snapshot(now, make_contract(now, 1, 101, 103)), tiny_graph, constraints(now)
     )
     for kwargs in ({"max_states": 1}, {"max_time_seconds": 1e-12}):
@@ -130,34 +127,24 @@ def test_subset_limits_never_convert_an_incumbent_into_a_ceiling(
         assert answer is not None and not answer.complete
         assert answer.objective_units == 0 and answer.upper_bound_units is None
         assert simulate_and_verify(
-            p.problem, tiny_graph, answer.visits, answer.selected_contract_ids
+            p, tiny_graph, answer.visits, answer.selected_contract_ids
         ).report.valid
     assert solve_subset(p, max_time_seconds=1, contract_limit=0) is None
 
 
 def test_subset_guards_and_infeasible_terminal(now: datetime, tiny_graph: UniverseGraph) -> None:
-    p = prepare_problem(
+    p = RouteProblem.from_snapshot(
         make_snapshot(now, make_contract(now, 1, 101, 103)), tiny_graph, constraints(now)
     )
     for c in (
-        replace(p.problem.constraints, required_system_ids=frozenset({2})),
-        replace(
-            p.problem.constraints, collateral_mode=CollateralMode.ROLLING, horizon_seconds=86_401
-        ),
+        replace(p.constraints, required_system_ids=frozenset({2})),
+        replace(p.constraints, collateral_mode=CollateralMode.ROLLING, horizon_seconds=86_401),
     ):
-        assert (
-            solve_subset(replace(p, problem=replace(p.problem, constraints=c)), max_time_seconds=1)
-            is None
-        )
-    active = ActiveShipment(p.problem.contracts[0], now + timedelta(hours=1), picked=True)
-    assert (
-        solve_subset(
-            replace(p, problem=replace(p.problem, active_shipments=(active,))), max_time_seconds=1
-        )
-        is None
-    )
-    c = replace(p.problem.constraints, return_to_start=False, finish_system_id=3, horizon_seconds=1)
-    answer = solve_subset(replace(p, problem=replace(p.problem, constraints=c)), max_time_seconds=1)
+        assert solve_subset(replace(p, constraints=c), max_time_seconds=1) is None
+    active = ActiveShipment(p.contracts[0], now + timedelta(hours=1), picked=True)
+    assert solve_subset(replace(p, active_shipments=(active,)), max_time_seconds=1) is None
+    c = replace(p.constraints, return_to_start=False, finish_system_id=3, horizon_seconds=1)
+    answer = solve_subset(replace(p, constraints=c), max_time_seconds=1)
     assert answer is not None and answer.complete and answer.objective_units is None
     for limit in (0, -1, float("nan")):
         with pytest.raises(ValueError):
@@ -169,7 +156,7 @@ def test_subset_reward_cut_excludes_more_than_the_full_selection(
     tiny_graph: UniverseGraph,
 ) -> None:
     # Every positive-reward pair is impossible, even though the full-set no-good permits pairs.
-    p = prepare_problem(
+    p = RouteProblem.from_snapshot(
         make_snapshot(
             now, *(make_contract(now, i, 101, 103, volume=60, reward=100 * i) for i in range(1, 4))
         ),
@@ -178,13 +165,13 @@ def test_subset_reward_cut_excludes_more_than_the_full_selection(
     )
     answer = solve_subset(p, max_time_seconds=1)
     assert answer is not None and answer.upper_bound_units == 300
-    route = EventModel(p)
-    cut = SubsetRewardCut(tuple((i.contract_id, i.reward_units) for i in p.problem.contracts), 300)
+    route = PickupDeliveryModel(p, selection_hint=build_greedy_route_hint(p))
+    cut = SubsetRewardCut(tuple((i.contract_id, i.reward_units) for i in p.contracts), 300)
     add_subset_reward_cut(route.model, route.contract_is_selected, cut)
     cp = cp_model.CpSolver()
     assert cp.solve(route.model) == cp_model.OPTIMAL
     visits, ids = route.extract(cp)
-    assert simulate_and_verify(p.problem, tiny_graph, visits, ids).total_reward_units == 300
+    assert simulate_and_verify(p, tiny_graph, visits, ids).total_reward_units == 300
     route.model.add(route.contract_is_selected[2] == 1)
     route.model.add(route.contract_is_selected[3] == 1)
     assert cp.solve(route.model) == cp_model.INFEASIBLE
@@ -200,7 +187,7 @@ def test_subset_respects_binding_locked_completion_deadlines(
         cargo_capacity_units=60,
         travel=TravelTimeModel(30_000, 0),
     )
-    p = prepare_problem(
+    p = RouteProblem.from_snapshot(
         make_snapshot(
             now,
             make_contract(now, 1, 101, 102, volume=60, reward=100),
@@ -212,5 +199,5 @@ def test_subset_respects_binding_locked_completion_deadlines(
     answer = solve_subset(p, max_time_seconds=1)
     assert answer is not None and answer.complete
     # Both trips fit the horizon, but the second delivery would miss its one-day deadline.
-    assert answer.upper_bound_units == 200 == solve_reference(p).objective_units
+    assert answer.upper_bound_units == 200 == solve_exhaustively(p).objective_units
     assert answer.infeasible_core_ids == (1, 2)

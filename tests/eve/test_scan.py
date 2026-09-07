@@ -17,10 +17,10 @@ from eve_courier_optimizer.domain import (
     SystemKillActivity,
     ThreatCategory,
 )
+from eve_courier_optimizer.eve.contract_scan import scan_public_couriers
 from eve_courier_optimizer.eve.esi import EsiClient
 from eve_courier_optimizer.eve.http import HttpResponse
-from eve_courier_optimizer.eve.scan import scan_public_couriers
-from eve_courier_optimizer.eve.snapshot import read_snapshot, write_snapshot
+from eve_courier_optimizer.eve.snapshot_file import read_snapshot, write_snapshot
 from eve_courier_optimizer.eve.zkill import ZkillClient
 from eve_courier_optimizer.routing.universe import Region, UniverseGraph
 from tests.conftest import make_contract, make_snapshot

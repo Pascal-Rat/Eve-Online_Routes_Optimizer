@@ -25,10 +25,10 @@ from eve_courier_optimizer.domain import (
     cargo_capacity_to_units,
     isk_to_units,
 )
-from eve_courier_optimizer.eve.snapshot import read_snapshot
+from eve_courier_optimizer.eve.snapshot_file import read_snapshot
 from eve_courier_optimizer.optimization import RouteOptimizer, SolverConfig
-from eve_courier_optimizer.routing.policy import threat_avoided_systems
-from eve_courier_optimizer.routing.preparation import prepare_problem
+from eve_courier_optimizer.routing.route_problem import RouteProblem
+from eve_courier_optimizer.routing.security import threat_avoided_systems
 from eve_courier_optimizer.routing.universe import UniverseGraph
 
 FIXTURE = Path(__file__).with_name("empire_snapshot_2026-08-06.json")
@@ -157,15 +157,15 @@ def run_empire_profile(
 
     graph = load_empire_graph()
     snapshot = read_snapshot(FIXTURE)
-    prepared = prepare_problem(snapshot, graph, _constraints(graph, snapshot, profile))
-    eligible = prepared.problem.scope.eligible_contracts
+    problem = RouteProblem.from_snapshot(snapshot, graph, _constraints(graph, snapshot, profile))
+    eligible = problem.scope.eligible_contracts
     if eligible != profile.expected_eligible:
         raise RuntimeError(
             f"{profile.name} baseline changed: expected {profile.expected_eligible} eligible "
             f"contracts, got {eligible}"
         )
     solved = RouteOptimizer(
-        prepared,
+        problem,
         graph,
         config=SolverConfig(
             max_time_seconds=time_limit_seconds,

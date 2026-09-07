@@ -26,6 +26,7 @@ includes complete solver settings, source/runner hashes, dependency versions, pr
 reward, bound, proof status, selected IDs, route finish and phase search times. Pipeline measurements
 isolate preparation, construction, selection cuts, system-master building and complete-event building
 without starting CP-SAT. They include variable/constraint/arc counts and model hashes.
+Each pipeline case starts after garbage collection so earlier models do not distort its phase times.
 
 Commit benchmark inputs, runners and regression assertions. Results, solver dumps and console logs
 are generated artifacts; `benchmarks/results/` is ignored by Git. Each `--output` appends one JSON
@@ -66,6 +67,8 @@ compare primary search. Use total elapsed for operator latency and phase times f
 Multiworker CP-SAT is nondeterministic. Even a single-worker master can cross a wall-time cutoff on a
 busy or slower CPU and change the later proof trajectory. Investigate repeated distributions and
 model/hint equality, while retaining every known optimum as an exact quality requirement.
+For short phases, also control interpreter warmup, cleanup and working directory; use matched
+processes or a shared-process profile to distinguish additional work from timing variation.
 
 `peak_resident_bytes` is a process high-water mark (null on Windows), not per-model allocated memory.
 To compare a particular case's memory, run `measure_pipeline --cases CASE --repeat 1` in a fresh

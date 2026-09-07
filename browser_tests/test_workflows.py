@@ -6,10 +6,10 @@ import pytest
 from playwright.sync_api import Page, expect
 
 from browser_tests.conftest import WebSession
-from eve_courier_optimizer.eve.snapshot import write_snapshot
+from eve_courier_optimizer.eve.snapshot_file import write_snapshot
 from tests.conftest import make_contract, make_snapshot
-from tests.desktop.test_jobs import SlowTransport
-from tests.desktop.test_server import planning_payload
+from tests.web.test_jobs import SlowTransport
+from tests.web.test_server import planning_payload
 
 
 def configure(page: Page) -> None:
@@ -40,8 +40,8 @@ def test_scan_rank_solve_reload_and_execute(page: Page, web_session: WebSession)
     page.locator("#locked-confirm").check()
     page.locator("#start-execution").click()
     expect(page.locator("#exec-active")).to_have_text("1")
-    assert web_session.app.execution is not None
-    web_session.clock.value = web_session.app.execution.current_time + timedelta(seconds=1)
+    assert web_session.app.trip is not None
+    web_session.clock.value = web_session.app.trip.current_time + timedelta(seconds=1)
     expect(page.locator("#scan-button")).to_be_disabled()
     page.get_by_role("button", name="Record pickup #9001", exact=True).click()
     expect(page.get_by_role("button", name="Record delivery #9001", exact=True)).to_be_visible()
@@ -60,8 +60,8 @@ def test_infeasible_route_keeps_recovery_controls(page: Page, web_session: WebSe
     app.scan({"regions": [10]})
     app.solve(planning_payload())
     app.start_execution({"confirm_locked_acceptance": True})
-    assert app.execution is not None
-    clock.value = app.execution.session_deadline - timedelta(seconds=1)
+    assert app.trip is not None
+    clock.value = app.trip.session_deadline - timedelta(seconds=1)
     assert app.replan({"refresh": False})["plan"]["route"] == []
     clock.value += timedelta(minutes=1)
     page.on("dialog", lambda dialog: dialog.accept())

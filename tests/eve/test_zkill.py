@@ -18,7 +18,7 @@ from eve_courier_optimizer.eve.zkill import (
     classify_gate_threat,
     collect_gate_threat_intel,
 )
-from eve_courier_optimizer.routing.policy import threat_avoided_systems
+from eve_courier_optimizer.routing.security import threat_avoided_systems
 from eve_courier_optimizer.routing.universe import (
     Region,
     SdeMetadata,

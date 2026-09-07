@@ -27,8 +27,8 @@ from eve_courier_optimizer.domain import (
     parse_esi_datetime,
 )
 from eve_courier_optimizer.optimization import RouteOptimizer, SolverConfig
-from eve_courier_optimizer.routing.policy import threat_avoided_systems
-from eve_courier_optimizer.routing.preparation import prepare_problem
+from eve_courier_optimizer.routing.route_problem import RouteProblem
+from eve_courier_optimizer.routing.security import threat_avoided_systems
 from eve_courier_optimizer.routing.universe import Region, SdeMetadata, SolarSystem, UniverseGraph
 
 FIXTURE = Path(__file__).with_name("frozen_universe.json")
@@ -178,9 +178,9 @@ def run_benchmark_scenarios(*, time_limit_seconds: float = 15.0) -> tuple[Benchm
             ),
         )
         started = time.perf_counter()
-        prepared = prepare_problem(snapshot, graph, constraints)
+        problem = RouteProblem.from_snapshot(snapshot, graph, constraints)
         solved = RouteOptimizer(
-            prepared,
+            problem,
             graph,
             config=SolverConfig(
                 max_time_seconds=time_limit_seconds,
@@ -193,7 +193,7 @@ def run_benchmark_scenarios(*, time_limit_seconds: float = 15.0) -> tuple[Benchm
             BenchmarkResult(
                 name=str(raw_scenario["name"]),
                 elapsed_seconds=elapsed,
-                eligible_contracts=prepared.problem.scope.eligible_contracts,
+                eligible_contracts=problem.scope.eligible_contracts,
                 selected_contracts=len(solved.selected_contract_ids),
                 reward_isk=str(Decimal(solved.total_reward_units) / Decimal(100)),
                 branches=solved.certificate.branches,

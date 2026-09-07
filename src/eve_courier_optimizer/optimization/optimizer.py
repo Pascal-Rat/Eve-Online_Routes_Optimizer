@@ -7,18 +7,28 @@ from dataclasses import replace
 
 from ortools.sat.python import cp_model
 
-from eve_courier_optimizer.domain import (
-    CollateralMode,
-    SolveResult,
+from eve_courier_optimizer.domain import CollateralMode, SolveResult
+from eve_courier_optimizer.optimization import proof_certificate
+from eve_courier_optimizer.optimization.models import pickup_delivery
+from eve_courier_optimizer.optimization.models.selection_bounds import (
+    add_selection_cuts,
+    add_subset_reward_cut,
+    integer_upper_bound,
 )
-from eve_courier_optimizer.routing.preparation import PreparedProblem
-from eve_courier_optimizer.routing.reference import solve_reference
-from eve_courier_optimizer.routing.replay import VerifiedRoute
+from eve_courier_optimizer.optimization.search import (
+    contract_selection,
+    fixed_contract_route,
+    route_insertion,
+)
+from eve_courier_optimizer.optimization.search.route_insertion import build_greedy_route_hint
+from eve_courier_optimizer.optimization.solver_config import (
+    INCUMBENT_DIVERSIFICATION_SECONDS,
+    SolverConfig,
+)
+from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.universe import UniverseGraph
-
-from . import certificate, events, route_checks, routes, selection
-from .config import INCUMBENT_DIVERSIFICATION_SECONDS, SolverConfig
-from .relaxation import add_selection_cuts, add_subset_reward_cut, integer_upper_bound
+from eve_courier_optimizer.verification.exhaustive_optimum import solve_exhaustively
+from eve_courier_optimizer.verification.route_replay import VerifiedRoute
 
 
 class RouteOptimizer:
@@ -26,13 +36,13 @@ class RouteOptimizer:
 
     def __init__(
         self,
-        prepared: PreparedProblem,
+        problem: RouteProblem,
         graph: UniverseGraph,
         *,
         config: SolverConfig | None = None,
         progress: Callable[[str], None] | None = None,
     ) -> None:
-        self.prepared = prepared
+        self.problem = problem
         self.graph = graph
         self.config = config or SolverConfig()
         self.progress = progress
@@ -40,11 +50,11 @@ class RouteOptimizer:
     def solve(self) -> SolveResult:
         if self.progress:
             self.progress("Proving reward with the system master and exact route checks")
-        incumbent = routes.construct_incumbent(self.prepared, self.graph)
-        proof = selection.ContractSelectionSearch(
-            self.prepared, self.graph, self.config, incumbent=incumbent
+        incumbent = route_insertion.construct_incumbent(self.problem, self.graph)
+        proof = contract_selection.ContractSelectionSearch(
+            self.problem, self.graph, self.config, incumbent=incumbent
         ).run()
-        search = certificate.SearchEvidence(
+        search = proof_certificate.SearchEvidence(
             incumbent, proof.upper_bound_units, "DECOMPOSITION_OPTIMAL"
         )
         if proof.incumbent is not None:
@@ -62,8 +72,8 @@ class RouteOptimizer:
         elif search.reward_proven:
             if self.config.minimize_finish_time_after_proof:
                 assert search.incumbent is not None
-                refinement = route_checks.refine_selection(
-                    self.prepared, self.graph, search.incumbent.selected_contract_ids, self.config
+                refinement = fixed_contract_route.refine_selection(
+                    self.problem, self.graph, search.incumbent.selected_contract_ids, self.config
                 )
                 proof = replace(
                     proof,
@@ -89,21 +99,23 @@ class RouteOptimizer:
                 # Stronger complete hints can consume more of CP-SAT's bounded presolve. Keep its
                 # seed stable; independently improve the final route when reward stays open.
                 search.consider(
-                    routes.diversify_incumbent(
-                        self.prepared,
+                    route_insertion.diversify_incumbent(
+                        self.problem,
                         self.graph,
                         search.incumbent,
                         reward_ceiling=search.upper_bound_units,
                         time_budget_seconds=INCUMBENT_DIVERSIFICATION_SECONDS,
                     )
                 )
-            return certificate.certify(self.prepared, search, proof, selection_closed=False)
-        return certificate.certify(self.prepared, search, proof, selection_closed=True)
+            return proof_certificate.certify(self.problem, search, proof, selection_closed=False)
+        return proof_certificate.certify(self.problem, search, proof, selection_closed=True)
 
     def _search_complete_model(
-        self, proof: selection.SelectionProof, incumbent: VerifiedRoute | None
-    ) -> certificate.SearchEvidence:
-        route = events.EventModel(self.prepared)
+        self, proof: contract_selection.SelectionProof, incumbent: VerifiedRoute | None
+    ) -> proof_certificate.SearchEvidence:
+        route = pickup_delivery.PickupDeliveryModel(
+            self.problem, selection_hint=build_greedy_route_hint(self.problem)
+        )
         bound = proof.upper_bound_units
         if bound is not None:
             route.model.add(route.total_reward_units <= bound)
@@ -120,7 +132,7 @@ class RouteOptimizer:
 
         solver = self.config.solver()
         status = solver.solve(route.model)
-        result = certificate.SearchEvidence(incumbent, bound, solver.status_name(status))
+        result = proof_certificate.SearchEvidence(incumbent, bound, solver.status_name(status))
         result.record(solver)
         if status == cp_model.MODEL_INVALID:
             raise ValueError("CP-SAT rejected the validated exact model")
@@ -132,7 +144,7 @@ class RouteOptimizer:
             return result
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             visits, ids = route.extract(solver)
-            candidate = VerifiedRoute.verify(self.prepared.problem, self.graph, visits, ids)
+            candidate = VerifiedRoute.verify(self.problem, self.graph, visits, ids)
             # IntVar reads preserve exact units above 2**53; the floating objective does not.
             reward = int(solver.value(route.total_reward_units))
             if candidate.simulation.total_reward_units != reward:
@@ -147,8 +159,8 @@ class RouteOptimizer:
         elif incumbent is not None:
             result.solver_status += "_WITH_INCUMBENT"
             if bound is None:
-                result.upper_bound_units = self.prepared.problem.committed_reward_units + sum(
-                    contract.reward_units for contract in self.prepared.problem.contracts
+                result.upper_bound_units = self.problem.committed_reward_units + sum(
+                    contract.reward_units for contract in self.problem.contracts
                 )
 
         if result.reward_proven and self.config.minimize_finish_time_after_proof:
@@ -162,7 +174,7 @@ class RouteOptimizer:
             result.record(duration_solver)
             if duration_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
                 visits, ids = route.extract(duration_solver)
-                candidate = VerifiedRoute.verify(self.prepared.problem, self.graph, visits, ids)
+                candidate = VerifiedRoute.verify(self.problem, self.graph, visits, ids)
                 if candidate.simulation.total_reward_units != result.upper_bound_units:
                     raise RuntimeError("duration refinement changed the proven reward")
                 result.consider(candidate)
@@ -171,13 +183,13 @@ class RouteOptimizer:
 
         if (
             status == cp_model.OPTIMAL
-            and self.prepared.problem.constraints.collateral_mode is CollateralMode.LOCKED
-            and not self.prepared.problem.active_shipments
-            and not self.prepared.problem.constraints.required_system_ids
-            and len(self.prepared.problem.contracts) <= self.config.independent_reference_limit
+            and self.problem.constraints.collateral_mode is CollateralMode.LOCKED
+            and not self.problem.active_shipments
+            and not self.problem.constraints.required_system_ids
+            and len(self.problem.contracts) <= self.config.independent_reference_limit
         ):
-            reference = solve_reference(
-                self.prepared, contract_limit=self.config.independent_reference_limit
+            reference = solve_exhaustively(
+                self.problem, contract_limit=self.config.independent_reference_limit
             )
             if reference.objective_units != result.upper_bound_units:
                 raise RuntimeError(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import platform
@@ -13,13 +14,14 @@ from pathlib import Path
 
 import eve_courier_optimizer
 from benchmarks.run_stress import CASES, prepare_case
-from eve_courier_optimizer.optimization.certificate import canonical_problem_sha256
-from eve_courier_optimizer.optimization.events import EventModel
-from eve_courier_optimizer.optimization.relaxation import (
-    SystemRelaxationMaster,
-    build_selection_cuts,
+from eve_courier_optimizer.optimization.models.pickup_delivery import PickupDeliveryModel
+from eve_courier_optimizer.optimization.models.selection_bounds import build_selection_cuts
+from eve_courier_optimizer.optimization.models.system_tour import SystemTourModel
+from eve_courier_optimizer.optimization.proof_certificate import canonical_problem_sha256
+from eve_courier_optimizer.optimization.search.route_insertion import (
+    build_greedy_route_hint,
+    construct_incumbent,
 )
-from eve_courier_optimizer.optimization.routes import construct_incumbent
 
 
 def peak_resident_bytes() -> int | None:
@@ -32,29 +34,31 @@ def peak_resident_bytes() -> int | None:
 
 
 def measure(case: str, *, seed: int) -> dict[str, object]:
+    # Cleanup of cycles from earlier CP models must not be charged to this case's phases.
+    gc.collect()
     started = time.perf_counter()
-    graph, prepared = prepare_case(case, seed=seed)
+    graph, problem = prepare_case(case, seed=seed)
     preparation = time.perf_counter() - started
     started = time.perf_counter()
-    incumbent = construct_incumbent(prepared, graph)
+    incumbent = construct_incumbent(problem, graph)
     construction = time.perf_counter() - started
     if incumbent is None:
         raise RuntimeError(f"{case}: construction produced no verified route")
     started = time.perf_counter()
-    cuts = build_selection_cuts(prepared)
+    cuts = build_selection_cuts(problem)
     selection = time.perf_counter() - started
     started = time.perf_counter()
-    master = SystemRelaxationMaster(prepared, selection_cuts=cuts)
+    master = SystemTourModel(problem, selection_cuts=cuts)
     master_seconds = time.perf_counter() - started
     started = time.perf_counter()
-    route = EventModel(prepared)
+    route = PickupDeliveryModel(problem, selection_hint=build_greedy_route_hint(problem))
     event_seconds = time.perf_counter() - started
     simulation = incumbent.simulation
     row: dict[str, object] = {
         "case": case,
         "seed": seed,
-        "fingerprint": canonical_problem_sha256(prepared.problem, prepared.jump_matrix),
-        "eligible": len(prepared.problem.contracts),
+        "fingerprint": canonical_problem_sha256(problem),
+        "eligible": len(problem.contracts),
         "preparation": preparation,
         "construction": construction,
         "selection_cuts": selection,

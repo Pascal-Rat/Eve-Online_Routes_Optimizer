@@ -8,18 +8,18 @@ from pathlib import Path
 
 import pytest
 
-from eve_courier_optimizer.desktop.server import create_http_server
-from eve_courier_optimizer.desktop.session import PlanningSession
 from eve_courier_optimizer.eve.esi import EsiClient
 from eve_courier_optimizer.routing.universe import UniverseGraph
+from eve_courier_optimizer.web.server import create_http_server
+from eve_courier_optimizer.web.workspace import PlanningWorkspace
 from tests.conftest import tiny_graph as tiny_graph
-from tests.desktop.test_recovery import MutableClock
-from tests.desktop.test_server import CourierTransport
+from tests.web.test_recovery import MutableClock
+from tests.web.test_server import CourierTransport
 
 
 @dataclass
 class WebSession:
-    app: PlanningSession
+    app: PlanningWorkspace
     clock: MutableClock
     url: str
 
@@ -27,7 +27,7 @@ class WebSession:
 @pytest.fixture
 def web_session(tiny_graph: UniverseGraph, tmp_path: Path) -> Iterator[WebSession]:
     clock = MutableClock(datetime.now(UTC))
-    app = PlanningSession(
+    app = PlanningWorkspace(
         tiny_graph, EsiClient(transport=CourierTransport(clock.value)), tmp_path, clock=clock
     )
     server = create_http_server(app, port=0)

@@ -10,7 +10,7 @@ from benchmarks.run_empire import FIXTURE as EMPIRE_FIXTURE
 from benchmarks.run_empire import load_empire_graph
 from benchmarks.run_frozen import EXPECTED_REWARDS, run_benchmark_scenarios
 from eve_courier_optimizer.domain import ProofStatus
-from eve_courier_optimizer.eve.snapshot import read_snapshot
+from eve_courier_optimizer.eve.snapshot_file import read_snapshot
 
 
 def test_frozen_dst_and_blockade_runner_targets_prove_global_optimality() -> None:
@@ -76,13 +76,16 @@ def test_route_diversification_preserves_best_known_stress_rewards(
     case: str, seed: int, reward_floor: int
 ) -> None:
     from benchmarks.run_stress import prepare_case
-    from eve_courier_optimizer.optimization.routes import construct_incumbent, diversify_incumbent
+    from eve_courier_optimizer.optimization.search.route_insertion import (
+        construct_incumbent,
+        diversify_incumbent,
+    )
 
-    graph, prepared = prepare_case(case, seed=seed)
-    initial = construct_incumbent(prepared, graph)
+    graph, problem = prepare_case(case, seed=seed)
+    initial = construct_incumbent(problem, graph)
     assert initial is not None
     improved = diversify_incumbent(
-        prepared, graph, initial, reward_ceiling=None, time_budget_seconds=10
+        problem, graph, initial, reward_ceiling=None, time_budget_seconds=10
     )
     assert improved.simulation.report.valid
     assert improved.quality >= initial.quality

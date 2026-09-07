@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import eve_courier_optimizer.cli as cli_module
-from eve_courier_optimizer.application.plan_output import solve_result_to_dict, write_solve_result
+from eve_courier_optimizer.application.plan_file import solve_result_to_dict, write_solve_result
 from eve_courier_optimizer.application.planner import CourierPlanner
 from eve_courier_optimizer.cli import main
 from eve_courier_optimizer.domain import (
@@ -19,7 +19,7 @@ from eve_courier_optimizer.domain import (
 )
 from eve_courier_optimizer.eve.esi import EsiClient
 from eve_courier_optimizer.eve.http import HttpResponse
-from eve_courier_optimizer.eve.snapshot import write_snapshot
+from eve_courier_optimizer.eve.snapshot_file import write_snapshot
 from eve_courier_optimizer.optimization import SolverConfig
 from eve_courier_optimizer.routing.universe import UniverseGraph
 from tests.conftest import make_contract, make_snapshot
@@ -53,8 +53,8 @@ def test_service_and_reporting(
         constraints,
         solver_config=SolverConfig(max_time_seconds=10),
     )
-    prepared, result = plan.prepared, plan.result
-    payload = solve_result_to_dict(result, prepared.problem)
+    problem, result = plan.problem, plan.result
+    payload = solve_result_to_dict(result, problem)
     assert payload["schema_version"] == 3
     assert payload["certificate"]["status"] == "proven_optimal"
     assert "bound_strengthening" in payload["certificate"]
@@ -66,7 +66,7 @@ def test_service_and_reporting(
     assert payload["travel_legs"][-1]["kind"] == "finish"
     assert payload["travel_legs"][-1]["to_system_id"] == 1
     output = tmp_path / "plan.json"
-    write_solve_result(output, result, prepared.problem)
+    write_solve_result(output, result, problem)
     assert json.loads(output.read_text())["route"][0]["action"] == "pickup"
     scanned = planner.scan([10])
     assert not scanned.contracts

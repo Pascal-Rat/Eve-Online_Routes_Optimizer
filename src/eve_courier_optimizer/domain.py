@@ -562,34 +562,6 @@ class ProblemScope:
 
 
 @dataclass(frozen=True, slots=True)
-class RouteProblem:
-    constraints: PlanningConstraints
-    contracts: tuple[RoutableContract, ...]
-    scope: ProblemScope
-    active_shipments: tuple[ActiveShipment, ...] = ()
-
-    @property
-    def committed_reward_units(self) -> int:
-        return sum(shipment.contract.reward_units for shipment in self.active_shipments)
-
-    @property
-    def initial_cargo_units(self) -> int:
-        return sum(s.contract.volume_units for s in self.active_shipments if s.picked)
-
-    @property
-    def initial_collateral_units(self) -> int:
-        return sum(s.contract.collateral_units for s in self.active_shipments)
-
-    @property
-    def initial_parcel_count(self) -> int:
-        return sum(s.picked for s in self.active_shipments)
-
-    @property
-    def mandatory_action_count(self) -> int:
-        return sum(1 if s.picked else 2 for s in self.active_shipments)
-
-
-@dataclass(frozen=True, slots=True)
 class RouteStep:
     sequence: int
     action: ActionKind

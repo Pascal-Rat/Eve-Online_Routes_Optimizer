@@ -19,11 +19,11 @@ from eve_courier_optimizer.domain import (
     TravelTimeModel,
 )
 from eve_courier_optimizer.optimization import RouteOptimizer, SolverConfig
-from eve_courier_optimizer.optimization.selection import ContractSelectionSearch
-from eve_courier_optimizer.routing.preparation import PreparedProblem, prepare_problem
-from eve_courier_optimizer.routing.reference import solve_reference
-from eve_courier_optimizer.routing.replay import simulate_and_verify
+from eve_courier_optimizer.optimization.search.contract_selection import ContractSelectionSearch
+from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.universe import UniverseGraph
+from eve_courier_optimizer.verification.exhaustive_optimum import solve_exhaustively
+from eve_courier_optimizer.verification.route_replay import simulate_and_verify
 from tests.conftest import make_contract, make_snapshot
 
 
@@ -47,8 +47,8 @@ def constraints(
     )
 
 
-def exact(prepared: PreparedProblem, graph: UniverseGraph) -> object:
-    return RouteOptimizer(prepared, graph, config=SolverConfig(max_time_seconds=10)).solve()
+def exact(problem: RouteProblem, graph: UniverseGraph) -> object:
+    return RouteOptimizer(problem, graph, config=SolverConfig(max_time_seconds=10)).solve()
 
 
 def test_solver_proves_optimal_interleaved_route(
@@ -57,9 +57,11 @@ def test_solver_proves_optimal_interleaved_route(
 ) -> None:
     first = make_contract(now, 1, 101, 102, reward=500)
     second = make_contract(now, 2, 102, 103, reward=900)
-    prepared = prepare_problem(make_snapshot(now, first, second), tiny_graph, constraints(now))
+    problem = RouteProblem.from_snapshot(
+        make_snapshot(now, first, second), tiny_graph, constraints(now)
+    )
 
-    result = RouteOptimizer(prepared, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
+    result = RouteOptimizer(problem, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
 
     assert result.certificate.status is ProofStatus.PROVEN_OPTIMAL
     assert result.certificate.best_bound_units == 1_400
@@ -78,9 +80,9 @@ def test_solver_preserves_exact_objective_above_binary_float_integer_range(
 ) -> None:
     reward = 2**53 + 1
     public = make_contract(now, 1, 101, 102, reward=reward)
-    prepared = prepare_problem(make_snapshot(now, public), tiny_graph, constraints(now))
+    problem = RouteProblem.from_snapshot(make_snapshot(now, public), tiny_graph, constraints(now))
 
-    result = RouteOptimizer(prepared, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
+    result = RouteOptimizer(problem, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
 
     assert result.certificate.status is ProofStatus.PROVEN_OPTIMAL
     assert result.total_reward_units == reward
@@ -96,9 +98,9 @@ def test_zero_cargo_can_solve_required_waypoint_loop_as_pure_route(
         constraints(now, cargo=0, horizon=100),
         required_system_ids=frozenset({3}),
     )
-    prepared = prepare_problem(make_snapshot(now), tiny_graph, route_only)
+    problem = RouteProblem.from_snapshot(make_snapshot(now), tiny_graph, route_only)
 
-    result = RouteOptimizer(prepared, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
+    result = RouteOptimizer(problem, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
 
     assert result.certificate.status is ProofStatus.PROVEN_OPTIMAL
     assert result.certificate.feasibility_verified
@@ -123,9 +125,9 @@ def test_open_route_can_require_a_fixed_finish_without_contracts(
         return_to_start=False,
         finish_system_id=3,
     )
-    prepared = prepare_problem(make_snapshot(now), tiny_graph, route_only)
+    problem = RouteProblem.from_snapshot(make_snapshot(now), tiny_graph, route_only)
 
-    result = RouteOptimizer(prepared, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
+    result = RouteOptimizer(problem, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
 
     assert result.certificate.status is ProofStatus.PROVEN_OPTIMAL
     assert result.finish_seconds == 20
@@ -144,12 +146,14 @@ def test_simultaneous_contract_limit_changes_the_proven_optimum(
     base = constraints(now, cargo=20, collateral=200, horizon=50)
 
     unrestricted = RouteOptimizer(
-        prepare_problem(snapshot, tiny_graph, base),
+        RouteProblem.from_snapshot(snapshot, tiny_graph, base),
         tiny_graph,
         config=SolverConfig(max_time_seconds=10),
     ).solve()
     limited = RouteOptimizer(
-        prepare_problem(snapshot, tiny_graph, replace(base, max_simultaneous_contracts=1)),
+        RouteProblem.from_snapshot(
+            snapshot, tiny_graph, replace(base, max_simultaneous_contracts=1)
+        ),
         tiny_graph,
         config=SolverConfig(max_time_seconds=10),
     ).solve()
@@ -176,13 +180,13 @@ def test_locked_vs_rolling_collateral_reuse(
     second = make_contract(now, 2, 102, 103, collateral=100, reward=700)
     snapshot = make_snapshot(now, first, second)
 
-    locked = prepare_problem(snapshot, tiny_graph, constraints(now, collateral=100))
+    locked = RouteProblem.from_snapshot(snapshot, tiny_graph, constraints(now, collateral=100))
     locked_result = RouteOptimizer(
         locked, tiny_graph, config=SolverConfig(max_time_seconds=10)
     ).solve()
     assert locked_result.total_reward_units == 700
 
-    rolling = prepare_problem(
+    rolling = RouteProblem.from_snapshot(
         snapshot,
         tiny_graph,
         constraints(now, collateral=100, mode=CollateralMode.ROLLING),
@@ -205,12 +209,12 @@ def test_cargo_capacity_forces_delivery_before_next_pickup(
 ) -> None:
     first = make_contract(now, 1, 101, 102, volume=15, reward=500)
     second = make_contract(now, 2, 102, 103, volume=15, reward=600)
-    prepared = prepare_problem(
+    problem = RouteProblem.from_snapshot(
         make_snapshot(now, first, second),
         tiny_graph,
         constraints(now, cargo=20),
     )
-    result = RouteOptimizer(prepared, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
+    result = RouteOptimizer(problem, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
     action_pairs = [(step.action.value, step.contract_id) for step in result.route]
     assert action_pairs == [
         ("pickup", 1),
@@ -228,11 +232,12 @@ def test_decomposition_learns_higher_order_cargo_infeasibility(
     use_subset_search: bool,
 ) -> None:
     monkeypatch.setattr(
-        "eve_courier_optimizer.optimization.batches.solve_batches", lambda *args, **kwargs: None
+        "eve_courier_optimizer.optimization.search.haul_batches.solve_batches",
+        lambda *args, **kwargs: None,
     )
     if not use_subset_search:
         monkeypatch.setattr(
-            "eve_courier_optimizer.optimization.subsets.solve_subset",
+            "eve_courier_optimizer.optimization.search.subset_search.solve_subset",
             lambda *args, **kwargs: None,
         )
     contracts = tuple(
@@ -247,14 +252,14 @@ def test_decomposition_learns_higher_order_cargo_infeasibility(
         )
         for contract_id in range(1, 21)
     )
-    prepared = prepare_problem(
+    problem = RouteProblem.from_snapshot(
         make_snapshot(now, *contracts),
         tiny_graph,
         constraints(now, cargo=100, collateral=200, horizon=50),
     )
 
     outcome = ContractSelectionSearch(
-        prepared,
+        problem,
         tiny_graph,
         SolverConfig(
             max_time_seconds=5,
@@ -291,13 +296,13 @@ def test_active_picked_shipment_can_make_model_infeasible(
     routable = RoutableContract.resolve(public, 1, 3)
     active = ActiveShipment(routable, deadline=now + timedelta(seconds=5), picked=True)
     snapshot = make_snapshot(now)
-    prepared = prepare_problem(
+    problem = RouteProblem.from_snapshot(
         snapshot,
         tiny_graph,
         constraints(now),
         active_shipments=(active,),
     )
-    result = RouteOptimizer(prepared, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
+    result = RouteOptimizer(problem, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
     assert result.certificate.status is ProofStatus.PROVEN_INFEASIBLE
     assert not result.route
 
@@ -309,13 +314,13 @@ def test_committed_unpicked_contract_is_mandatory_and_ordered(
     public = make_contract(now, 9, 102, 103, reward=1_000)
     routable = RoutableContract.resolve(public, 2, 3)
     active = ActiveShipment(routable, deadline=now + timedelta(hours=1), picked=False)
-    prepared = prepare_problem(
+    problem = RouteProblem.from_snapshot(
         make_snapshot(now),
         tiny_graph,
         constraints(now),
         active_shipments=(active,),
     )
-    result = RouteOptimizer(prepared, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
+    result = RouteOptimizer(problem, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
     assert result.certificate.status is ProofStatus.PROVEN_OPTIMAL
     assert [(step.action.value, step.contract_id) for step in result.route] == [
         ("pickup", 9),
@@ -333,8 +338,8 @@ def test_heuristic_candidate_cap_is_visible_in_certificate(
         make_contract(now, 1, 101, 102, reward=500),
         make_contract(now, 2, 101, 102, reward=600),
     )
-    prepared = prepare_problem(snapshot, tiny_graph, constraints(now), max_candidates=1)
-    result = RouteOptimizer(prepared, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
+    problem = RouteProblem.from_snapshot(snapshot, tiny_graph, constraints(now), max_candidates=1)
+    result = RouteOptimizer(problem, tiny_graph, config=SolverConfig(max_time_seconds=10)).solve()
     assert result.certificate.status is ProofStatus.PROVEN_OPTIMAL
     assert not result.certificate.scope_untruncated
     assert "truncated" in result.certificate.claim
@@ -345,9 +350,9 @@ def test_independent_simulator_rejects_delivery_before_pickup(
     tiny_graph: UniverseGraph,
 ) -> None:
     public = make_contract(now, 1, 101, 102)
-    prepared = prepare_problem(make_snapshot(now, public), tiny_graph, constraints(now))
+    problem = RouteProblem.from_snapshot(make_snapshot(now, public), tiny_graph, constraints(now))
     simulation = simulate_and_verify(
-        prepared.problem,
+        problem,
         tiny_graph,
         (PlannedAction(action=ActionKind.DELIVERY, contract_id=1),),
         (1,),
@@ -378,14 +383,14 @@ def test_cp_sat_matches_reference_on_random_small_instances(
                     reward=rng.randint(100, 1_000),
                 )
             )
-        prepared = prepare_problem(
+        problem = RouteProblem.from_snapshot(
             make_snapshot(now, *contracts),
             tiny_graph,
             constraints(now, cargo=20, collateral=160, horizon=100),
         )
-        reference = solve_reference(prepared, contract_limit=10)
+        reference = solve_exhaustively(problem, contract_limit=10)
         result = RouteOptimizer(
-            prepared,
+            problem,
             tiny_graph,
             config=SolverConfig(max_time_seconds=10, independent_reference_limit=0),
         ).solve()
@@ -397,13 +402,13 @@ def test_reference_solver_rejects_unsupported_modes(
     now: datetime,
     tiny_graph: UniverseGraph,
 ) -> None:
-    prepared = prepare_problem(
+    problem = RouteProblem.from_snapshot(
         make_snapshot(now, make_contract(now, 1, 101, 102)),
         tiny_graph,
         constraints(now, mode=CollateralMode.ROLLING),
     )
     with pytest.raises(ValueError, match="locked collateral"):
-        solve_reference(prepared)
+        solve_exhaustively(problem)
 
 
 @pytest.mark.parametrize("deadline_offset_us, feasible", [(-1, False), (0, True), (1, True)])
@@ -415,21 +420,21 @@ def test_active_delivery_deadline_is_inclusive_at_subsecond_precision(
 ) -> None:
     contract = RoutableContract.resolve(make_contract(now, 1, 101, 101), 1, 1)
     shipment = ActiveShipment(contract, now + timedelta(microseconds=deadline_offset_us))
-    prepared = prepare_problem(
+    problem = RouteProblem.from_snapshot(
         make_snapshot(now),
         tiny_graph,
         replace(constraints(now, horizon=0), travel=TravelTimeModel(1, 0)),
         active_shipments=(shipment,),
     )
     simulation = simulate_and_verify(
-        prepared.problem,
+        problem,
         tiny_graph,
         (PlannedAction(ActionKind.DELIVERY, 1),),
         (),
     )
     assert simulation.report.valid is feasible
     result = RouteOptimizer(
-        prepared, tiny_graph, config=SolverConfig(minimize_finish_time_after_proof=False)
+        problem, tiny_graph, config=SolverConfig(minimize_finish_time_after_proof=False)
     ).solve()
     assert result.certificate.status is (
         ProofStatus.PROVEN_OPTIMAL if feasible else ProofStatus.PROVEN_INFEASIBLE
@@ -440,14 +445,14 @@ def test_tiny_budget_retains_mandatory_delivery_incumbent(
     now: datetime, tiny_graph: UniverseGraph
 ) -> None:
     contract = RoutableContract.resolve(make_contract(now, 1, 101, 101), 1, 1)
-    prepared = prepare_problem(
+    problem = RouteProblem.from_snapshot(
         make_snapshot(now),
         tiny_graph,
         replace(constraints(now, horizon=0), travel=TravelTimeModel(1, 0)),
         active_shipments=(ActiveShipment(contract, now + timedelta(hours=1)),),
     )
     result = RouteOptimizer(
-        prepared,
+        problem,
         tiny_graph,
         config=SolverConfig(
             max_time_seconds=1e-8,

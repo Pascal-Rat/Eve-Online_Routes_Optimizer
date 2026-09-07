@@ -2,7 +2,8 @@
 
 ## Local API
 
-`desktop/server.py` owns loopback HTTP and static assets; `session.py` owns the durable planning session.
+`web/server.py` serves loopback HTTP and static assets. `web/requests.py` decodes input before
+`web/workspace.py` invokes the planner and saves the resulting snapshot, plan or courier trip.
 The browser uses native ES modules with no frontend build step. Requests are same-origin JSON;
 responses carry either a result or an `error` message. Invalid input returns 400, failed external
 feeds return 502, and internal/storage failures return 500 with server-side diagnostics.
@@ -21,20 +22,20 @@ a fixed asset/download allowlist and a 1 MiB request limit protect the local bou
 | `POST /api/action` | Record pickup, delivery, waypoint or terminal progress |
 | `POST /api/execution/extend` | Add positive integer `minutes` to the planning horizon |
 | `POST /api/execution/reset` | Explicitly discard execution state |
-| `GET /download/{snapshot,plan,execution}.json` | Existing durable artifacts |
+| `GET /download/{snapshot,plan,execution}.json` | Saved JSON files |
 
 Only one long job runs at a time. It owns a spawned process and temporary workspace. The parent
 publishes a completed result; cancelling the worker preserves the previous session. API mutation
 is serialized while a worker runs. A browser reload reconnects to the job; a server restart ends it.
 The API serves the local UI; the versioned files below are the durable interchange contract.
 
-## Artifact schemas
+## Saved files
 
 Writers publish each file by flushing a sibling temporary file and atomically replacing its target.
-This prevents partial JSON files; it is not a transaction spanning all three artifacts. Readers
+This prevents partial JSON files; it is not a transaction spanning all three files. Readers
 validate integer/boolean fields and reject unknown future schema versions.
 
-| Artifact | Schema | Authoritative contents |
+| File | Schema | Authoritative contents |
 | --- | ---: | --- |
 | `snapshot.json` | 2 | Observation time, compatibility date, SDE build, regions, public contracts, optional aggregate activity and full gate-threat evidence |
 | `plan.json` | 3 | Selected IDs, integer reward, finish, proof certificate, scope, constraints, route actions and physical travel legs |
@@ -51,7 +52,7 @@ path. The UI adds SDE names/security values without calculating another route. R
 have no courier actions but still contain travel legs. Undefined ranking ratios serialize as `null`.
 
 A saved plan is restored for display only when its snapshot/SDE identity matches. Arming requires an
-in-memory plan with its prepared input and verified result, followed by departure-time replay.
+in-memory plan with its route problem and verified result, followed by departure-time replay.
 
 Default UI storage is `$XDG_DATA_HOME/eve-courier-route-optimizer` (or
 `~/.local/share/eve-courier-route-optimizer`) on Linux, `~/Library/Application Support/EveCourierRouteOptimizer`
