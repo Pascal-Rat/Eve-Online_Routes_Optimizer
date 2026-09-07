@@ -48,8 +48,10 @@ A candidate cap can exclude the true optimum and is always marked as truncated s
 
 The model uses NPC-station endpoints, normal stargates, deterministic jump/service times and a
 recorded contract observation. ESI pagination is not a transactional market snapshot. Reward excludes
-fuel, losses, taxes and opportunity cost. Read [domain rules](docs/DOMAIN.md) and
-[optimization and proof](docs/OPTIMIZATION.md) for the exact scope.
+fuel, losses, taxes and opportunity cost. Start with
+[how the solver finds and proves a route](docs/HOW_THE_SOLVER_WORKS.md) for a plain-language example.
+The [domain rules](docs/DOMAIN.md) and [technical optimization guide](docs/OPTIMIZATION.md)
+define the exact scope and mathematical formulation.
 
 ## CLI
 

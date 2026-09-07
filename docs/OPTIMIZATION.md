@@ -4,6 +4,9 @@ The objective is maximum gross courier reward over the declared snapshot and rou
 A feasible route supplies a lower bound. A sound relaxation or completed exact search supplies
 an upper bound. Equality proves the reward optimum; a timeout alone proves nothing.
 
+For a worked example without the mathematical terminology, start with
+[how the solver finds and proves a route](HOW_THE_SOLVER_WORKS.md).
+
 ## Complete event model
 
 `optimization/models/pickup_delivery.py` exposes the mathematical structure directly: event catalog, circuit,
@@ -20,14 +23,15 @@ The end represents the original start, a fixed destination, or a free finish wit
 
 For a used real arc from `u` to `v`:
 
-$$
-t_v = t_u + service(u) + jumpSeconds \times J(system(u), system(v)),
-\qquad order_v = order_u + 1.
-$$
+```text
+t_v     = t_u + service(u) + seconds_per_jump * J(system(u), system(v))
+order_v = order_u + 1
+```
 
-`J` is the exact shortest-path metric closure of the permitted graph. Equality prevents invented
-waiting from changing relative delivery windows. Pickup precedes delivery by event order, including
-when travel and service are zero. Start arrival is zero; finish arrival cannot exceed the horizon.
+`t_u` and `t_v` are arrival times; `J` is the exact shortest-path metric closure of the permitted graph.
+Equality prevents invented waiting from changing relative delivery windows. Pickup precedes delivery
+by event order, including when travel and service are zero. Start arrival is zero; finish arrival
+cannot exceed the horizon.
 
 Cargo, parcels and rolling collateral propagate by each destination event's resource change.
 Their variable domains enforce capacity after every action. Active cargo/parcels initialize the
@@ -37,9 +41,12 @@ collateral at departure. [Domain rules](DOMAIN.md) specify expiry and deadline s
 
 For mandatory reward `R_A` and optional rewards `r_i`, the objective is:
 
-$$
-\max R = R_A + \sum_i r_i x_i.
-$$
+```text
+maximize R
+R = R_A + sum(r_i * x_i for each optional contract i)
+```
+
+Each `x_i` is 1 when selected and 0 otherwise, so each selected reward is counted once.
 
 A redundant total-duration equality telescopes travel plus service across the path. Necessary
 resource-work and incompatibility inequalities strengthen propagation without changing feasibility.
