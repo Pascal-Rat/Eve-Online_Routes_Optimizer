@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from benchmarks.run_empire import FIXTURE as EMPIRE_FIXTURE
+from benchmarks.run_empire import load_empire_graph
 from benchmarks.run_frozen import EXPECTED_REWARDS, run_benchmark_scenarios
 from eve_courier_optimizer.domain import ProofStatus
-from eve_courier_optimizer.sde import load_bundled_graph
 from eve_courier_optimizer.snapshot import read_snapshot
 
 
@@ -23,7 +23,7 @@ def test_frozen_dst_and_blockade_runner_targets_prove_global_optimality() -> Non
 
 
 def test_realistic_empire_fixture_has_complete_declared_scope() -> None:
-    graph = load_bundled_graph()
+    graph = load_empire_graph()
     snapshot = read_snapshot(EMPIRE_FIXTURE)
 
     empire_regions = graph.empire_region_ids()

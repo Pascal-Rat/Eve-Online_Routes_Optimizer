@@ -27,12 +27,11 @@ from eve_courier_optimizer.sde import (
     SdeMetadata,
     SolarSystem,
     UniverseGraph,
-    load_bundled_graph,
 )
 from eve_courier_optimizer.snapshot import ContractSnapshot, read_snapshot
 from eve_courier_optimizer.solver import SolverConfig, solve_exact
 
-from .run_empire import FIXTURE, PROFILES, _constraints
+from .run_empire import FIXTURE, PROFILES, _constraints, load_empire_graph
 
 CASES = (
     "empire_dst",
@@ -48,7 +47,7 @@ CASES = (
 
 def prepare_case(name: str, *, seed: int = 17) -> tuple[UniverseGraph, PreparedProblem]:
     if name.startswith("empire_"):
-        graph = load_bundled_graph()
+        graph = load_empire_graph()
         snapshot = read_snapshot(FIXTURE)
         profile = PROFILES[1] if name == "empire_br_rolling" else PROFILES[0]
         constraints = _constraints(graph, snapshot, profile)
