@@ -45,7 +45,7 @@ where = ["src"]
 namespaces = false
 
 [tool.setuptools.package-data]
-eve_courier_optimizer = ["data/*.sqlite3"]
+eve_courier_optimizer = ["data/*.sqlite3", "py.typed"]
 "eve_courier_optimizer.web" = ["assets/*.html", "assets/*.css", "assets/*.js"]
 
 [tool.ruff]
