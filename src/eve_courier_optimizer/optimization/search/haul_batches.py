@@ -8,7 +8,10 @@ import time
 from ortools.sat.python import cp_model
 
 from eve_courier_optimizer.domain import ActionKind, CollateralMode, PlannedAction
-from eve_courier_optimizer.optimization.models.selection_bounds import integer_upper_bound
+from eve_courier_optimizer.optimization.models.selection_bounds import (
+    RewardBoundRecorder,
+    integer_upper_bound,
+)
 from eve_courier_optimizer.optimization.search.subset_search import SubsetSearchResult
 from eve_courier_optimizer.routing.route_problem import RouteProblem
 
@@ -110,10 +113,19 @@ def solve_batches(
     cp.parameters.max_time_in_seconds = remaining
     cp.parameters.num_search_workers = 1
     cp.parameters.random_seed = random_seed
+    bounds = RewardBoundRecorder()
+    cp.best_bound_callback = bounds
     status = cp.solve(model)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        # In particular, an UNKNOWN response's default zero bound is not a reward certificate.
-        return SubsetSearchResult(None, None, (), (), False, 0, time.perf_counter() - started)
+        return SubsetSearchResult(
+            None,
+            bounds.upper_bound_units if status == cp_model.UNKNOWN else None,
+            (),
+            (),
+            False,
+            0,
+            time.perf_counter() - started,
+        )
     visits: list[PlannedAction] = []
     ids = []
     for b in range(trips):

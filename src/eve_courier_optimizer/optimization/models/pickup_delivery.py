@@ -14,7 +14,11 @@ from eve_courier_optimizer.domain import (
     PlannedVisit,
     PlannedWaypoint,
 )
-from eve_courier_optimizer.optimization.models.selection_bounds import add_resource_work_bounds
+from eve_courier_optimizer.optimization.models.selection_bounds import (
+    SelectionCuts,
+    add_resource_work_bounds,
+    add_selection_cuts,
+)
 from eve_courier_optimizer.routing.route_problem import RouteProblem
 
 _START: Final = "start"
@@ -201,7 +205,13 @@ class PickupDeliveryModel:
     start_node_id = _START_NODE_ID
     end_node_id = _END_NODE_ID
 
-    def __init__(self, problem: RouteProblem, *, selection_hint: tuple[PlannedVisit, ...]) -> None:
+    def __init__(
+        self,
+        problem: RouteProblem,
+        *,
+        selection_hint: tuple[PlannedVisit, ...],
+        selection_cuts: SelectionCuts | None = None,
+    ) -> None:
         self.problem = problem
         self.constraints = problem.constraints
         self.catalog = _build_route_event_catalog(problem)
@@ -209,6 +219,8 @@ class PickupDeliveryModel:
         self.optional_contracts = {c.contract_id: c for c in problem.contracts}
         self.commitments = {s.contract.contract_id: s for s in problem.active_shipments}
         self.model = cp_model.CpModel()
+        self.selection_cuts = selection_cuts or SelectionCuts((), ())
+        self.incompatible_contract_pairs = {frozenset(pair) for pair in self.selection_cuts.pairs}
         self.pickup_by_delivery = {
             self.catalog.optional_deliveries[contract_id]: (
                 self.catalog.optional_pickups[contract_id]
@@ -232,6 +244,7 @@ class PickupDeliveryModel:
         self.latest_arrivals = tuple(self._latest_arrival(event) for event in self.events)
 
         self._add_circuit()
+        add_selection_cuts(self.model, self.contract_is_selected, self.selection_cuts)
         self._create_event_state()
         self._propagate_route_resources()
         self._add_contract_constraints()
@@ -301,11 +314,29 @@ class PickupDeliveryModel:
         )
 
     def _latest_arrival(self, event: RouteEvent) -> int:
+        terminal = self.constraints.terminal_system_id
+        service = self.constraints.travel.service_seconds
+        remaining_seconds = service if event.action_kind is not None else 0
+        last_system = event.system_id
+        if event.node_id in self.delivery_by_pickup:
+            delivery = self.events[self.delivery_by_pickup[event.node_id]]
+            assert event.system_id is not None and delivery.system_id is not None
+            travel = self._travel_seconds(event.system_id, delivery.system_id)
+            if travel is None:
+                return -1
+            remaining_seconds += travel + service
+            last_system = delivery.system_id
+        if terminal is not None and last_system is not None:
+            travel = self._travel_seconds(last_system, terminal)
+            if travel is None:
+                return -1
+            remaining_seconds += travel
+        # Every continuation must service this event, deliver its parcel if this is a
+        # pickup, and reach the terminal. Shortcutting all other work is optimistic.
+        latest_finish_arrival = self.constraints.horizon_seconds - remaining_seconds
         if event.action_kind is None:
-            return self.constraints.horizon_seconds
-        latest_arrival_seconds = (
-            self.constraints.horizon_seconds - self.constraints.travel.service_seconds
-        )
+            return latest_finish_arrival
+        latest_arrival_seconds = latest_finish_arrival
         assert event.contract_id is not None
         optional_contract = self.optional_contracts.get(event.contract_id)
         if optional_contract is not None:
@@ -406,6 +437,15 @@ class PickupDeliveryModel:
                     destination_event.node_id == _START_NODE_ID
                     or destination_event.node_id == source_event.node_id
                 ):
+                    continue
+                if (
+                    source_event.is_optional
+                    and destination_event.is_optional
+                    and frozenset((source_event.contract_id, destination_event.contract_id))
+                    in self.incompatible_contract_pairs
+                ):
+                    # Both endpoints of a real arc must be selected. A proven pair
+                    # conflict therefore makes every arc between these jobs impossible.
                     continue
                 if (
                     (

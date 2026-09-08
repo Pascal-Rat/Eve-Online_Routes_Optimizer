@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import heapq
+import math
+import time
 from dataclasses import dataclass
 
 from eve_courier_optimizer.domain import CollateralMode
@@ -13,9 +15,12 @@ from eve_courier_optimizer.routing.route_problem import RouteProblem
 class ExhaustiveOptimum:
     objective_units: int | None
     explored_states: int
+    complete: bool = True
 
 
-def solve_exhaustively(problem: RouteProblem, *, contract_limit: int = 12) -> ExhaustiveOptimum:
+def solve_exhaustively(
+    problem: RouteProblem, *, contract_limit: int = 12, deadline: float = math.inf
+) -> ExhaustiveOptimum:
     """Exhaustively solve a small locked-collateral instance.
 
     This intentionally simple implementation is independent of OR-Tools. It stores one bit per
@@ -76,6 +81,8 @@ def solve_exhaustively(problem: RouteProblem, *, contract_limit: int = 12) -> Ex
         )
 
     while states_to_explore:
+        if time.perf_counter() >= deadline:
+            return ExhaustiveOptimum(best_reward_units, explored_state_count, complete=False)
         (
             elapsed_seconds,
             _,

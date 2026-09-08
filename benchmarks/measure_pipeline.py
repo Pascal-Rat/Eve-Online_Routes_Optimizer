@@ -51,7 +51,9 @@ def measure(case: str, *, seed: int) -> dict[str, object]:
     master = SystemTourModel(problem, selection_cuts=cuts)
     master_seconds = time.perf_counter() - started
     started = time.perf_counter()
-    route = PickupDeliveryModel(problem, selection_hint=build_greedy_route_hint(problem))
+    route = PickupDeliveryModel(
+        problem, selection_hint=build_greedy_route_hint(problem), selection_cuts=cuts
+    )
     event_seconds = time.perf_counter() - started
     simulation = incumbent.simulation
     row: dict[str, object] = {

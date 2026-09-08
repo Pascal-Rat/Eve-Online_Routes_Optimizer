@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, replace
 from enum import Enum, auto
@@ -62,15 +63,13 @@ class ContractSelectionSearch:
         config: SolverConfig,
         *,
         incumbent: VerifiedRoute | None = None,
+        deadline: float = math.inf,
     ) -> None:
         self.problem = problem
         self.graph = graph
         self.config = config
-        self.selection_cuts = (
-            selection_bounds.build_selection_cuts(problem)
-            if len(problem.contracts) >= MIN_CONTRACTS_FOR_SELECTION_SEARCH
-            else selection_bounds.SelectionCuts((), ())
-        )
+        self.deadline = deadline
+        self.selection_cuts = selection_bounds.SelectionCuts((), ())
         self.incumbent = incumbent
         self.best_upper_bound: int | None = None
         self.latest_master: system_tour.SystemRewardBound | None = None
@@ -89,23 +88,39 @@ class ContractSelectionSearch:
     def run(self) -> SelectionProof:
         if len(self.problem.contracts) < MIN_CONTRACTS_FOR_SELECTION_SEARCH:
             return self._proof()
+        phase_seconds = (
+            self.config.decomposition_time_seconds or self.config.relaxation_time_seconds
+        )
+        started = time.perf_counter()
+        # Keep time for the complete model when the total allowance is short. Standalone
+        # selection searches (no caller deadline) retain their configured phase limit.
+        phase_seconds = min(phase_seconds, max(0.0, (self.deadline - started) / 2))
+        self.deadline = min(self.deadline, started + phase_seconds)
+        if time.perf_counter() >= self.deadline:
+            self.status = "budget_exhausted"
+            return self._proof()
+        self.selection_cuts = selection_bounds.build_selection_cuts(self.problem)
         if self.config.relaxation_time_seconds <= 0:
             self.status = "disabled"
             return self._proof()
 
         master = system_tour.SystemTourModel(self.problem, selection_cuts=self.selection_cuts)
         self._hint_master(master)
+        remaining = self.deadline - time.perf_counter()
+        if remaining <= 0:
+            self.status = "budget_exhausted"
+            return self._proof()
         if self.config.decomposition_time_seconds == 0:
             self._record_master(
                 master.solve(
-                    max_time_seconds=self.config.relaxation_time_seconds,
+                    max_time_seconds=min(self.config.relaxation_time_seconds, remaining),
                     random_seed=self.config.random_seed,
                 )
             )
             self.status = "bound_only"
             return self._proof()
 
-        deadline = time.perf_counter() + self.config.decomposition_time_seconds
+        deadline = self.deadline
         self.status = "budget_exhausted"
         self._search_haul_batches(master)
         if self.reward_proven:
@@ -155,11 +170,14 @@ class ContractSelectionSearch:
             self.status = "iteration_limit"
 
     def _search_haul_batches(self, master: system_tour.SystemTourModel) -> None:
+        remaining = self.deadline - time.perf_counter()
+        if remaining <= 0:
+            return
         result = haul_batches.solve_batches(
             self.problem,
             max_time_seconds=min(
                 self.config.decomposition_subproblem_time_seconds,
-                self.config.decomposition_time_seconds,
+                remaining,
             ),
             random_seed=self.config.random_seed,
         )
@@ -172,8 +190,11 @@ class ContractSelectionSearch:
             self._accept_route(result.visits, result.selected_contract_ids, result.objective_units)
         if result.upper_bound_units is not None:
             self.best_upper_bound = result.upper_bound_units
+            batch_status = "BATCH_OPTIMAL" if result.complete else "BATCH_FEASIBLE"
+            if result.objective_units is None:
+                batch_status = "BATCH_UNKNOWN"
             self.latest_master = system_tour.SystemRewardBound(
-                "BATCH_OPTIMAL" if result.complete else "BATCH_FEASIBLE",
+                batch_status,
                 self.best_upper_bound,
                 result.objective_units,
                 0.0,

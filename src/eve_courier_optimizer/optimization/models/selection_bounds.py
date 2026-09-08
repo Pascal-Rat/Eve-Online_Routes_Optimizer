@@ -66,6 +66,26 @@ def integer_upper_bound(raw_bound: float) -> int:
     return int(math.ceil(math.nextafter(raw_bound, math.inf)))
 
 
+@dataclass(slots=True)
+class RewardBoundRecorder:
+    """Retain explicit CP-SAT bound events for one integer reward maximization.
+
+    An UNKNOWN response can contain a default zero if stopped before search initialization.
+    Only an actual bound callback certifies progress in that case. OR-Tools serializes these
+    callbacks under its response-manager mutex. Use a fresh recorder for each reward solve;
+    duration minimization and fixed-selection feasibility have different bound meanings.
+    """
+
+    upper_bound_units: int | None = None
+
+    def __call__(self, raw_bound: float) -> None:
+        if not math.isfinite(raw_bound):
+            return
+        bound = integer_upper_bound(raw_bound)
+        if self.upper_bound_units is None or bound < self.upper_bound_units:
+            self.upper_bound_units = bound
+
+
 @dataclass(frozen=True, slots=True)
 class _ResourceWorkSpec:
     capacity: int
@@ -90,6 +110,163 @@ class _LiftedResourceWorkSpec(_ResourceWorkSpec):
         if value < self.threshold:
             return 0
         return self.capacity if value > self.capacity - self.threshold else value
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceCrossings:
+    """Integer crossing counts for one distance potential, including complete route hints."""
+
+    potential: dict[int, int]
+    layers: tuple[tuple[int, cp_model.IntVar, cp_model.IntVar], ...]
+
+    def hint(self, model: cp_model.CpModel, system_order: tuple[int, ...]) -> None:
+        for level, outward, inward in self.layers:
+            sides = tuple(self.potential[system] >= level for system in system_order)
+            model.add_hint(
+                outward, sum(not a and b for a, b in zip(sides, sides[1:], strict=False))
+            )
+            model.add_hint(inward, sum(a and not b for a, b in zip(sides, sides[1:], strict=False)))
+
+
+def add_resource_crossing_bounds(
+    model: cp_model.CpModel,
+    problem: RouteProblem,
+    selected: dict[int, cp_model.IntVar],
+) -> tuple[ResourceCrossings, ...]:
+    """Count whole capacity-limited trips across distance layers of a symmetric metric.
+
+    Each parcel whose endpoints lie on opposite sides must cross while carried. For each
+    resource, demand <= capacity * integer crossings. Outward minus inward crossings equals
+    the terminal-side change (or either possible terminal side for a free finish). A shortest
+    distance potential changes by at most one per jump, so the sum of crossings over disjoint
+    layers cannot exceed actual travel. Different potentials each bound that same travel;
+    their bounds must never be added together or charged against the shorter master circuit.
+
+    Consecutive layers with no endpoint between them have identical required demand and
+    terminal balance. Their common minimum crossing count may be weighted by their width.
+    Start/terminal potentials are structural choices independent of benchmark identities.
+    """
+    c = problem.constraints
+    if any(d != problem.jump_matrix.get((b, a)) for (a, b), d in problem.jump_matrix.items()):
+        return ()
+    # Capacity and (optional selection ID, transformed demand, source, destination).
+    resources: list[tuple[int, tuple[tuple[int | None, int, int, int], ...]]] = []
+    systems = {c.start_system_id, *c.required_system_ids}
+    for spec in _resource_work_specs(problem):
+        if spec.capacity <= 0:
+            continue
+        shipments: list[tuple[int | None, int, int, int]] = []
+        for item in problem.contracts:
+            value = (
+                item.volume_units
+                if spec.resource == "volume"
+                else item.collateral_units
+                if spec.resource == "collateral"
+                else 1
+            )
+            shipments.append(
+                (
+                    item.contract_id,
+                    spec.demand(value),
+                    item.origin_system_id,
+                    item.destination_system_id,
+                )
+            )
+        for active in problem.active_shipments:
+            item = active.contract
+            value = (
+                item.volume_units
+                if spec.resource == "volume"
+                else item.collateral_units
+                if spec.resource == "collateral"
+                else 1
+            )
+            origin = (
+                c.start_system_id
+                if active.picked or spec.resource == "collateral"
+                else item.origin_system_id
+            )
+            shipments.append((None, spec.demand(value), origin, item.destination_system_id))
+        for _, _, source, destination in shipments:
+            systems.update((source, destination))
+        resources.append((spec.capacity, tuple(shipments)))
+    if not resources:
+        return ()
+    if c.terminal_system_id is not None:
+        systems.add(c.terminal_system_id)
+    service = c.travel.service_seconds * (
+        problem.mandatory_action_count + 2 * sum(selected.values())
+    )
+    max_crossings = c.horizon_seconds // c.travel.seconds_per_jump
+    result = []
+    pivots = {c.start_system_id}
+    if c.terminal_system_id is not None:
+        pivots.add(c.terminal_system_id)
+    for pivot in sorted(pivots):
+        distances = {s: problem.jump_matrix.get((pivot, s)) for s in systems}
+        if any(distance is None for distance in distances.values()):
+            continue
+        potential = {s: d for s, d in distances.items() if d is not None}
+        levels = sorted(set(potential.values()))
+        expression_magnitude = (
+            2 * (levels[-1] - levels[0]) * max_crossings * c.travel.seconds_per_jump
+            + c.travel.service_seconds * (problem.mandatory_action_count + 2 * len(selected))
+            + c.horizon_seconds
+        )
+        if expression_magnitude >= 2**62:
+            continue
+        layers = []
+        travel_terms = []
+        for low, high in zip(levels, levels[1:], strict=False):
+            outward = model.new_int_var(0, max_crossings, f"cross_out_{pivot}_{high}")
+            inward = model.new_int_var(0, max_crossings, f"cross_in_{pivot}_{high}")
+            layers.append((high, outward, inward))
+            travel_terms.append((high - low) * (outward + inward))
+            start_side = int(potential[c.start_system_id] >= high)
+            if c.terminal_system_id is not None:
+                model.add(
+                    outward - inward == int(potential[c.terminal_system_id] >= high) - start_side
+                )
+            else:
+                model.add(outward - inward >= -start_side)
+                model.add(outward - inward <= 1 - start_side)
+            seen = set()
+            for capacity, resource_shipments in resources:
+                for source_side, crossings in ((False, outward), (True, inward)):
+                    demand = tuple(
+                        (cid, value)
+                        for cid, value, source, destination in resource_shipments
+                        if value
+                        and (potential[source] >= high) == source_side
+                        and (potential[destination] >= high) != source_side
+                    )
+                    divisor = math.gcd(capacity, *(value for _, value in demand))
+                    scaled_capacity = capacity // divisor
+                    signature = (
+                        source_side,
+                        scaled_capacity,
+                        tuple((cid, v // divisor) for cid, v in demand),
+                    )
+                    if not demand or signature in seen:
+                        continue
+                    seen.add(signature)
+                    # Optional strengthening must not overflow an otherwise valid model.
+                    if (
+                        sum(v // divisor for _, v in demand) + scaled_capacity * max_crossings
+                        >= 2**62
+                    ):
+                        continue
+                    model.add(
+                        sum(
+                            v // divisor * (1 if cid is None else selected[cid])
+                            for cid, v in demand
+                        )
+                        <= scaled_capacity * crossings
+                    )
+        if layers:
+            model.add(c.travel.seconds_per_jump * sum(travel_terms) + service <= c.horizon_seconds)
+            result.append(ResourceCrossings(potential, tuple(layers)))
+    return tuple(result)
 
 
 def _resource_work_specs(problem: RouteProblem) -> list[_ResourceWorkSpec]:

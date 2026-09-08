@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 
@@ -37,6 +38,7 @@ def check_selection(
 ) -> SelectionCheck:
     """Test one master selection exactly and return a sufficient infeasibility core when needed."""
 
+    solve_deadline = time.perf_counter() + max_time_seconds
     reduced_problem = problem.restrict_contracts(selected_contract_ids)
     route_model = PickupDeliveryModel(
         reduced_problem, selection_hint=build_greedy_route_hint(reduced_problem)
@@ -46,7 +48,6 @@ def check_selection(
         literal.index: contract_id
         for contract_id, literal in route_model.contract_is_selected.items()
     }
-    solve_deadline = time.perf_counter() + max_time_seconds
     total_wall_time_seconds = 0.0
     total_branches = 0
     total_conflicts = 0
@@ -74,7 +75,7 @@ def check_selection(
         return solver, status
 
     selection_solver, status = solve_assuming_selected_contracts(
-        selected_contract_ids, max_time_seconds
+        selected_contract_ids, max(0.0, solve_deadline - time.perf_counter())
     )
     total_wall_time_seconds += selection_solver.wall_time
     total_branches += selection_solver.num_branches
@@ -179,6 +180,8 @@ def refine_selection(
     graph: UniverseGraph,
     selected_contract_ids: tuple[int, ...],
     config: SolverConfig,
+    *,
+    deadline: float = math.inf,
 ) -> SelectionCheck:
     """Optionally minimize finish time after contract selection has proved maximum reward."""
 
@@ -192,7 +195,9 @@ def refine_selection(
     validation_error = route_model.model.validate()
     if validation_error:
         raise ValueError(f"invalid fixed-selection refinement model: {validation_error}")
-    solver = config.solver(seconds=config.secondary_time_seconds)
+    solver = config.solver(
+        seconds=max(0.0, min(config.secondary_time_seconds, deadline - time.perf_counter()))
+    )
     status = solver.solve(route_model.model)
     if status == cp_model.MODEL_INVALID:
         raise ValueError("CP-SAT rejected the validated fixed-selection refinement model")

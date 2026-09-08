@@ -263,14 +263,13 @@ def test_seed_reward_proof_still_refines_duration(
         problem,
         tiny_graph,
         config=SolverConfig(
-            max_time_seconds=1e-8,
+            max_time_seconds=5,
             decomposition_time_seconds=0,
             secondary_time_seconds=2,
         ),
     ).solve()
-    # The seed hauls the two jobs sequentially in 84 seconds. Either the total reward sum
-    # (small case) or the bound-only master proves it optimal, despite no primary assignment.
-    # Requested duration refinement must still combine both parcels into one 44-second loop.
+    # The trivial ceiling (small case) or bound-only master proves maximum reward.
+    # Refinement shares the remaining overall allowance and keeps the 44-second loop.
     assert result.certificate.status is ProofStatus.PROVEN_OPTIMAL
     assert result.certificate.feasibility_verified
     assert result.finish_seconds == 44
@@ -305,12 +304,12 @@ def test_duration_search_cannot_replace_a_faster_verified_incumbent(
     )
     monkeypatch.setattr(
         "eve_courier_optimizer.optimization.search.fixed_contract_route.refine_selection",
-        lambda *args: refinement,
+        lambda *args, **kwargs: refinement,
     )
     result = RouteOptimizer(
         problem,
         tiny_graph,
-        config=SolverConfig(max_time_seconds=1e-8, decomposition_time_seconds=0),
+        config=SolverConfig(max_time_seconds=5, decomposition_time_seconds=0),
     ).solve()
     assert result.certificate.status is ProofStatus.PROVEN_OPTIMAL
     assert result.total_reward_units == incumbent.simulation.total_reward_units

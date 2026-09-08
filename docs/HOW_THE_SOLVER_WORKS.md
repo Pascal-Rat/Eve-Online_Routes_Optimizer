@@ -67,6 +67,12 @@ and visit their endpoint systems, while leaving out some detailed pickup order a
 Every real route has a corresponding possibility in this easier problem. The easier problem can
 therefore overestimate what we can earn, but cannot exclude a better real route.
 
+This optimism never permits splitting a parcel in a returned route. For example, three 40 m³
+parcels in a 100 m³ hold need two outbound trips. A simple volume estimate can undercount that
+travel, making the reward ceiling too generous. The selection model now also counts whole
+crossings and necessary returns to tighten that estimate. The exact route search and independent
+checker always handle each parcel as one indivisible pickup and delivery.
+
 There are two distinct results here: an optimistic contract selection to investigate, and a
 rigorous ceiling on all selections. **Merely finding a selection worth 25M does not prove that
 25M is a ceiling.** The optimizer needs a proven optimum of the easier model or a bound its solver

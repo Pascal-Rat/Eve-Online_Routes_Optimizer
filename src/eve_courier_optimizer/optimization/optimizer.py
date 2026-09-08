@@ -11,7 +11,7 @@ from eve_courier_optimizer.domain import CollateralMode, SolveResult
 from eve_courier_optimizer.optimization import proof_certificate
 from eve_courier_optimizer.optimization.models import pickup_delivery
 from eve_courier_optimizer.optimization.models.selection_bounds import (
-    add_selection_cuts,
+    RewardBoundRecorder,
     add_subset_reward_cut,
     integer_upper_bound,
 )
@@ -23,6 +23,7 @@ from eve_courier_optimizer.optimization.search import (
 from eve_courier_optimizer.optimization.search.route_insertion import build_greedy_route_hint
 from eve_courier_optimizer.optimization.solver_config import (
     INCUMBENT_DIVERSIFICATION_SECONDS,
+    SearchBudget,
     SolverConfig,
 )
 from eve_courier_optimizer.routing.route_problem import RouteProblem
@@ -48,14 +49,24 @@ class RouteOptimizer:
         self.progress = progress
 
     def solve(self) -> SolveResult:
+        budget = SearchBudget(self.config.max_time_seconds)
         if self.progress:
             self.progress("Proving reward with the system master and exact route checks")
-        incumbent = route_insertion.construct_incumbent(self.problem, self.graph)
+        incumbent = route_insertion.construct_incumbent(
+            self.problem, self.graph, deadline=budget.deadline
+        )
         proof = contract_selection.ContractSelectionSearch(
-            self.problem, self.graph, self.config, incumbent=incumbent
+            self.problem, self.graph, self.config, incumbent=incumbent, deadline=budget.deadline
         ).run()
+        trivial_bound = self.problem.committed_reward_units + sum(
+            item.reward_units for item in self.problem.contracts
+        )
         search = proof_certificate.SearchEvidence(
-            incumbent, proof.upper_bound_units, "DECOMPOSITION_OPTIMAL"
+            incumbent,
+            proof.upper_bound_units if proof.upper_bound_units is not None else trivial_bound,
+            "DECOMPOSITION_OPTIMAL"
+            if proof.upper_bound_units is not None
+            else "TRIVIAL_BOUND_MATCHED",
         )
         if proof.incumbent is not None:
             search.consider(proof.incumbent)
@@ -70,56 +81,94 @@ class RouteOptimizer:
             search.solver_status = "DECOMPOSITION_INFEASIBLE"
             search.upper_bound_units = None
         elif search.reward_proven:
-            if self.config.minimize_finish_time_after_proof:
-                assert search.incumbent is not None
-                refinement = fixed_contract_route.refine_selection(
-                    self.problem, self.graph, search.incumbent.selected_contract_ids, self.config
-                )
-                proof = replace(
-                    proof,
-                    subproblem_wall_time_seconds=(
-                        proof.subproblem_wall_time_seconds + refinement.wall_time_seconds
-                    ),
-                    subproblem_branches=proof.subproblem_branches + refinement.branches,
-                    subproblem_conflicts=proof.subproblem_conflicts + refinement.conflicts,
-                )
-                if refinement.simulation is not None:
-                    search.consider(
-                        VerifiedRoute(refinement.selected_contract_ids, refinement.simulation)
-                    )
+            proof = self._refine_selection(search, proof, budget)
         else:
-            if self.progress:
-                self.progress("Searching the complete pickup and delivery model")
-            search = self._search_complete_model(proof, search.incumbent)
+            if budget.expired():
+                search.solver_status = "TIME_LIMIT"
+                return proof_certificate.certify(
+                    self.problem, search, proof, selection_closed=False
+                )
             if (
                 search.incumbent is not None
                 and not search.reward_proven
                 and proof.master_result is not None
+                and not budget.expired()
             ):
-                # Stronger complete hints can consume more of CP-SAT's bounded presolve. Keep its
-                # seed stable; independently improve the final route when reward stays open.
+                # Improve the verified seed before exact search spends the remaining budget.
+                # The full solver can never replace it with a lower-quality route.
                 search.consider(
                     route_insertion.diversify_incumbent(
                         self.problem,
                         self.graph,
                         search.incumbent,
                         reward_ceiling=search.upper_bound_units,
-                        time_budget_seconds=INCUMBENT_DIVERSIFICATION_SECONDS,
+                        time_budget_seconds=min(
+                            INCUMBENT_DIVERSIFICATION_SECONDS, budget.remaining() / 4
+                        ),
                     )
                 )
+            if not search.reward_proven and not budget.expired():
+                if self.progress:
+                    self.progress("Searching the complete pickup and delivery model")
+                search = self._search_complete_model(proof, search.incumbent, budget)
+            elif not search.reward_proven:
+                search.solver_status = "TIME_LIMIT"
+            else:
+                proof = self._refine_selection(search, proof, budget)
+            self._check_reference(search, budget)
             return proof_certificate.certify(self.problem, search, proof, selection_closed=False)
-        return proof_certificate.certify(self.problem, search, proof, selection_closed=True)
+        self._check_reference(search, budget)
+        return proof_certificate.certify(
+            self.problem,
+            search,
+            proof,
+            selection_closed=proof.proven_infeasible or proof.upper_bound_units is not None,
+        )
+
+    def _refine_selection(
+        self,
+        search: proof_certificate.SearchEvidence,
+        proof: contract_selection.SelectionProof,
+        budget: SearchBudget,
+    ) -> contract_selection.SelectionProof:
+        if not self.config.minimize_finish_time_after_proof or budget.expired():
+            return proof
+        assert search.incumbent is not None and search.reward_proven
+        refinement = fixed_contract_route.refine_selection(
+            self.problem,
+            self.graph,
+            search.incumbent.selected_contract_ids,
+            self.config,
+            deadline=budget.deadline,
+        )
+        if refinement.simulation is not None:
+            search.consider(VerifiedRoute(refinement.selected_contract_ids, refinement.simulation))
+        return replace(
+            proof,
+            subproblem_wall_time_seconds=(
+                proof.subproblem_wall_time_seconds + refinement.wall_time_seconds
+            ),
+            subproblem_branches=proof.subproblem_branches + refinement.branches,
+            subproblem_conflicts=proof.subproblem_conflicts + refinement.conflicts,
+        )
 
     def _search_complete_model(
-        self, proof: contract_selection.SelectionProof, incumbent: VerifiedRoute | None
+        self,
+        proof: contract_selection.SelectionProof,
+        incumbent: VerifiedRoute | None,
+        budget: SearchBudget,
     ) -> proof_certificate.SearchEvidence:
         route = pickup_delivery.PickupDeliveryModel(
-            self.problem, selection_hint=build_greedy_route_hint(self.problem)
+            self.problem,
+            selection_hint=() if incumbent else build_greedy_route_hint(self.problem),
+            selection_cuts=proof.selection_cuts,
         )
         bound = proof.upper_bound_units
-        if bound is not None:
-            route.model.add(route.total_reward_units <= bound)
-        add_selection_cuts(route.model, route.contract_is_selected, proof.selection_cuts)
+        if bound is None:
+            bound = self.problem.committed_reward_units + sum(
+                item.reward_units for item in self.problem.contracts
+            )
+        route.model.add(route.total_reward_units <= bound)
         for core in proof.learned_infeasibility_cores:
             route.model.add(sum(route.contract_is_selected[cid] for cid in core) <= len(core) - 1)
         for cut in proof.learned_reward_cuts:
@@ -130,7 +179,11 @@ class RouteOptimizer:
         if validation_error:
             raise ValueError(f"invalid or numerically unsafe CP-SAT model: {validation_error}")
 
-        solver = self.config.solver()
+        if budget.expired():
+            return proof_certificate.SearchEvidence(incumbent, bound, "TIME_LIMIT")
+        solver = self.config.solver(seconds=budget.remaining())
+        bounds = RewardBoundRecorder()
+        solver.best_bound_callback = bounds
         status = solver.solve(route.model)
         result = proof_certificate.SearchEvidence(incumbent, bound, solver.status_name(status))
         result.record(solver)
@@ -155,21 +208,26 @@ class RouteOptimizer:
                 if status == cp_model.OPTIMAL
                 else integer_upper_bound(solver.best_objective_bound)
             )
-            result.upper_bound_units = solver_bound if bound is None else min(bound, solver_bound)
-        elif incumbent is not None:
-            result.solver_status += "_WITH_INCUMBENT"
-            if bound is None:
-                result.upper_bound_units = self.problem.committed_reward_units + sum(
-                    contract.reward_units for contract in self.problem.contracts
-                )
+            result.upper_bound_units = min(bound, solver_bound)
+        elif status == cp_model.UNKNOWN:
+            if bounds.upper_bound_units is not None:
+                result.upper_bound_units = min(bound, bounds.upper_bound_units)
+            if incumbent is not None:
+                result.solver_status += "_WITH_INCUMBENT"
 
-        if result.reward_proven and self.config.minimize_finish_time_after_proof:
+        if (
+            result.reward_proven
+            and self.config.minimize_finish_time_after_proof
+            and not budget.expired()
+        ):
             if self.progress:
                 self.progress("Reward proven; refining route duration")
             assert result.incumbent is not None
             route.model.add(route.total_reward_units == result.upper_bound_units)
             route.model.minimize(route.finish_time_seconds)
-            duration_solver = self.config.solver(seconds=self.config.secondary_time_seconds)
+            duration_solver = self.config.solver(
+                seconds=budget.remaining(self.config.secondary_time_seconds)
+            )
             duration_status = duration_solver.solve(route.model)
             result.record(duration_solver)
             if duration_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -181,20 +239,27 @@ class RouteOptimizer:
             elif duration_status in (cp_model.INFEASIBLE, cp_model.MODEL_INVALID):
                 raise RuntimeError("duration refinement rejected a verified feasible reward")
 
+        return result
+
+    def _check_reference(
+        self, result: proof_certificate.SearchEvidence, budget: SearchBudget
+    ) -> None:
         if (
-            status == cp_model.OPTIMAL
+            result.reward_proven
             and self.problem.constraints.collateral_mode is CollateralMode.LOCKED
             and not self.problem.active_shipments
             and not self.problem.constraints.required_system_ids
             and len(self.problem.contracts) <= self.config.independent_reference_limit
+            and not budget.expired()
         ):
             reference = solve_exhaustively(
-                self.problem, contract_limit=self.config.independent_reference_limit
+                self.problem,
+                contract_limit=self.config.independent_reference_limit,
+                deadline=budget.deadline,
             )
-            if reference.objective_units != result.upper_bound_units:
+            if reference.complete and reference.objective_units != result.upper_bound_units:
                 raise RuntimeError(
                     "CP-SAT optimum disagrees with independent exhaustive reference solver: "
                     f"{result.upper_bound_units} != {reference.objective_units}"
                 )
-            result.reference_verified = True
-        return result
+            result.reference_verified = reference.complete

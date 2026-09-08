@@ -255,7 +255,12 @@ def _add_planning_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_solver_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--time-limit", type=float, default=300.0)
+    parser.add_argument(
+        "--time-limit",
+        type=float,
+        default=300.0,
+        help="Total optimization allowance in seconds; excludes snapshot/graph preparation",
+    )
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--solver-log", action="store_true")
     parser.add_argument("--require-optimal", action="store_true")

@@ -3,16 +3,31 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 
 from ortools.sat.python import cp_model
 
-# Spend at most one additional second on verified route neighborhoods when reward remains unproven.
+# Reserve a bounded route-neighborhood phase inside the overall solve budget.
 INCUMBENT_DIVERSIFICATION_SECONDS = 1.0
+
+
+class SearchBudget:
+    """One monotonic, cooperative deadline shared by setup, search and refinement."""
+
+    def __init__(self, seconds: float | None) -> None:
+        self.deadline = math.inf if seconds is None else time.perf_counter() + seconds
+
+    def remaining(self, cap: float = math.inf) -> float:
+        return max(0.0, min(cap, self.deadline - time.perf_counter()))
+
+    def expired(self) -> bool:
+        return self.remaining() <= 0
 
 
 @dataclass(frozen=True, slots=True)
 class SolverConfig:
+    # Total RouteOptimizer.solve allowance; phase limits below share this budget.
     max_time_seconds: float | None = 300.0
     num_workers: int = 1
     random_seed: int = 0

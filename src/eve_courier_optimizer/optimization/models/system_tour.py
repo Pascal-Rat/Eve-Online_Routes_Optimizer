@@ -8,7 +8,10 @@ from ortools.sat.python import cp_model
 
 from eve_courier_optimizer.domain import CollateralMode
 from eve_courier_optimizer.optimization.models.selection_bounds import (
+    ResourceCrossings,
+    RewardBoundRecorder,
     SelectionCuts,
+    add_resource_crossing_bounds,
     add_resource_work_bounds,
     add_selection_cuts,
     build_selection_cuts,
@@ -43,6 +46,9 @@ class SystemTourModel:
     arc_is_used: dict[tuple[int, int], cp_model.IntVar]
     system_is_visited: dict[int, cp_model.IntVar]
     system_is_skipped: dict[int, cp_model.IntVar]
+    resource_crossings: tuple[ResourceCrossings, ...]
+    start_system_id: int
+    terminal_system_id: int | None
 
     def __init__(
         self, problem: RouteProblem, *, selection_cuts: SelectionCuts | None = None
@@ -188,6 +194,9 @@ class SystemTourModel:
             )
         )
         add_resource_work_bounds(model, problem, contract_is_selected)
+        self.resource_crossings = add_resource_crossing_bounds(model, problem, contract_is_selected)
+        self.start_system_id = start_system_id
+        self.terminal_system_id = terminal_system_id
         model.maximize(total_reward_units)
 
         validation_error = model.validate()
@@ -230,6 +239,11 @@ class SystemTourModel:
             if arc[0] != arc[1]:
                 self.model.add_hint(variable, int(arc in arcs))
         self.model.add_hint(self.total_reward_units, reward)
+        full_order = (self.start_system_id, *system_order)
+        if self.terminal_system_id is not None and full_order[-1] != self.terminal_system_id:
+            full_order = (*full_order, self.terminal_system_id)
+        for crossings in self.resource_crossings:
+            crossings.hint(self.model, full_order)
         self.model.add(self.total_reward_units >= reward)
 
     def exclude_infeasible_selection(self, contract_ids: tuple[int, ...]) -> None:
@@ -267,7 +281,13 @@ class SystemTourModel:
         solver.parameters.max_time_in_seconds = max_time_seconds
         # Single-worker search avoids portfolio overhead on this smaller bound model.
         solver.parameters.num_search_workers = 1
+        # The master is mostly Boolean selection and circuit decisions. Include their
+        # Boolean constraints in the LP, so it can tighten the reward ceiling before
+        # branching on complete tours. Keep the event oracle's settings independent.
+        solver.parameters.linearization_level = 2
         solver.parameters.random_seed = random_seed
+        bounds = RewardBoundRecorder()
+        solver.best_bound_callback = bounds
         status = solver.solve(self.model)
         status_name = solver.status_name(status)
         objective_units: int | None = None
@@ -292,6 +312,8 @@ class SystemTourModel:
             )
         elif status == cp_model.MODEL_INVALID:
             raise ValueError("CP-SAT rejected the validated system-relaxation model")
+        elif status == cp_model.UNKNOWN:
+            upper_bound_units = bounds.upper_bound_units
 
         return SystemRewardBound(
             status_name=status_name,

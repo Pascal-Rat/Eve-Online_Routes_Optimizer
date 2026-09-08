@@ -61,9 +61,13 @@ The comparator rejects mismatched problem/settings groups and unverified routes.
 and bound ranges, proof counts and median elapsed times; it does not hide an unfavorable trial behind
 one average or turn a timing threshold into an optimization theorem.
 
-The full-event time limit is **not** an end-to-end deadline. Decomposition, model construction and
-secondary duration refinement have separate costs. Stress runs disable secondary refinement to
-compare primary search. Use total elapsed for operator latency and phase times for diagnosis.
+The time limit is a shared cooperative allowance for optimization, including decomposition,
+construction and secondary refinement; input preparation is outside it. Atomic operations and
+solver cleanup may overrun slightly. Older revisions such as `edf56a2` instead give the full event
+search a separate allowance. When comparing those revisions, subtract the decomposition cap from
+their event allowance and record actual elapsed time; this still gives the baseline additional
+construction/diversification time. Stress runs disable secondary refinement to compare primary
+search. Use total elapsed for operator latency and phase times for diagnosis.
 Multiworker CP-SAT is nondeterministic. Even a single-worker master can cross a wall-time cutoff on a
 busy or slower CPU and change the later proof trajectory. Investigate repeated distributions and
 model/hint equality, while retaining every known optimum as an exact quality requirement.
@@ -74,3 +78,29 @@ processes or a shared-process profile to distinguish additional work from timing
 To compare a particular case's memory, run `measure_pipeline --cases CASE --repeat 1` in a fresh
 process for each revision with equivalent instrumentation and object lifetimes. Do not compare one
 script retaining previous models with another that releases each case's local objects.
+
+## Generalization checks
+
+`run_generalization` separates generated-input seeds from the CP-SAT seed and varies graph shape
+(cycles, trees, sparse graphs and grids with chords), ports, capacity pressure, collateral mode,
+fixed/free/loop finishes, expiry, required waypoints and accepted shipments. Numeric system labels
+are shuffled. These cases complement the frozen observed snapshots and independently enumerated
+small correctness tests; none alone establishes performance on every EVE workload.
+
+```bash
+python -m benchmarks.run_generalization --input-seeds 4101 4102 4103 4104 \
+  --solver-seed 29 --time-limit 12 --decomposition-time 4 \
+  --output benchmarks/results/generalization.jsonl
+```
+
+Declare the evaluation seeds, workload families, budgets and acceptance criteria before looking at
+results. Use `--development` for existing stress cases while developing a candidate. Freeze the
+algorithm, settings and runner before evaluating held-out seeds, retain every result, and compare
+problem fingerprints across revisions. If a candidate is changed in response to those results,
+the inspected cases become development data and need a fresh holdout. The runner records source
+and runner hashes, versions, settings, input/search seeds and proof evidence. For old budget
+semantics use `--legacy-phase-budget` with the same target allowance and document the difference.
+
+Benchmark identities and known optima belong in fixtures and assertions, never in production
+selection, pruning or solver settings. Structural heuristics still need empirical evaluation:
+using a contract-count threshold instead of a fixture name does not itself prove generalization.

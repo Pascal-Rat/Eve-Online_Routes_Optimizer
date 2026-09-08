@@ -232,6 +232,11 @@ def test_lifted_work_tightens_mixed_load_bound(
         tiny_graph,
         replace(constraints(now, horizon=70), travel=TravelTimeModel(10, 0)),
     )
+    # Isolate the packing transform; integer crossing bounds independently close this gap.
+    monkeypatch.setattr(
+        "eve_courier_optimizer.optimization.models.system_tour.add_resource_crossing_bounds",
+        lambda *args: (),
+    )
     specs = bounds._resource_work_specs
     with monkeypatch.context() as patch:
         patch.setattr(

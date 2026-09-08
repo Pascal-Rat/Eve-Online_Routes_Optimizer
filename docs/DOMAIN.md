@@ -25,6 +25,8 @@ Each pickup/delivery consumes the configured service time. Travel uses shortest 
 paths times seconds per jump. There is no discretionary waiting. Cargo and picked-but-undelivered
 parcel counts must fit after each action; the optional parcel limit may be zero. An accepted but
 unpicked shipment already locks collateral, but occupies no cargo or parcel slot until pickup.
+Each courier parcel is indivisible: pickup loads its full volume and delivery unloads it in one
+action. Splitting a parcel across separate trips is never a feasible plan.
 
 Required systems belong to the optimized trip, and may be visited in any order. A loop includes the
 return to its original start; a fixed finish includes final travel there. A fully open route may

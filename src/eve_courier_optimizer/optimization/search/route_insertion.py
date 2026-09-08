@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Mapping
 from dataclasses import replace
@@ -31,6 +32,7 @@ def insert_additional_contracts(
     simulation: SimulationResult,
     *,
     candidate_order: tuple[SingleContractScore, ...] | None = None,
+    deadline: float = math.inf,
 ) -> tuple[tuple[PlannedVisit, ...], SimulationResult]:
     """Try each unused contract in every precedence-respecting pair of insertion positions.
 
@@ -66,6 +68,8 @@ def insert_additional_contracts(
         return c.horizon_seconds + 1 if jumps is None else jumps * c.travel.seconds_per_jump
 
     for score in candidates:
+        if time.perf_counter() >= deadline:
+            break
         contract = score.contract
         if contract.contract_id in selected:
             continue
@@ -99,6 +103,8 @@ def insert_additional_contracts(
         origin, destination = contract.origin_system_id, contract.destination_system_id
         options: list[tuple[int, int, int]] = []
         for pickup_slot in range(len(systems)):
+            if time.perf_counter() >= deadline:
+                return visits, simulation
             max_cargo = max_parcels = max_collateral = 0
             for delivery_slot in range(pickup_slot, len(systems)):
                 max_cargo = max(max_cargo, cargo[delivery_slot])
@@ -138,6 +144,8 @@ def insert_additional_contracts(
                 if finish <= c.horizon_seconds:
                     options.append((finish, pickup_slot, delivery_slot))
         for _, pickup_slot, delivery_slot in sorted(options):
+            if time.perf_counter() >= deadline:
+                return visits, simulation
             trial = (
                 *visits[:pickup_slot],
                 PlannedAction(ActionKind.PICKUP, contract.contract_id),
@@ -217,6 +225,7 @@ def improve_incumbent(
     simulation: SimulationResult,
     *,
     restart_visits: tuple[PlannedVisit, ...],
+    deadline: float = math.inf,
 ) -> tuple[tuple[PlannedVisit, ...], SimulationResult]:
     """Rebuild in three orders, then explore one contract-removal/repair neighborhood.
 
@@ -226,7 +235,7 @@ def improve_incumbent(
     an unbounded local search. Only independently verified improvements become search hints and
     lower bounds; candidate eligibility, objective coefficients and proof scope remain unchanged.
     """
-    best = insert_additional_contracts(problem, graph, visits, simulation)
+    best = insert_additional_contracts(problem, graph, visits, simulation, deadline=deadline)
     if problem.active_shipments or not best[1].report.valid:
         return best
     restart_simulation = simulate_and_verify(problem, graph, restart_visits, ())
@@ -238,12 +247,15 @@ def improve_incumbent(
         return result[1].total_reward_units, -result[1].finish_seconds
 
     for order in orders:
+        if time.perf_counter() >= deadline:
+            return best
         candidate = insert_additional_contracts(
             problem,
             graph,
             restart_visits,
             restart_simulation,
             candidate_order=order,
+            deadline=deadline,
         )
         if quality(candidate) > quality(best):
             best = candidate
@@ -251,6 +263,8 @@ def improve_incumbent(
     selected = {v.contract_id for v in seed_visits if isinstance(v, PlannedAction)}
     items = {i.contract_id: i for i in problem.contracts}
     for removed in sorted(selected):
+        if time.perf_counter() >= deadline:
+            break
         reduced = _remove_contract_visits(
             seed_visits,
             frozenset({removed}),
@@ -272,6 +286,7 @@ def improve_incumbent(
                 reduced,
                 sim,
                 candidate_order=order,
+                deadline=deadline,
             )
             if quality(candidate) > quality(best):
                 best = candidate
@@ -410,7 +425,9 @@ def build_greedy_route_hint(problem: RouteProblem) -> tuple[PlannedVisit, ...]:
     return tuple(visits)
 
 
-def construct_incumbent(problem: RouteProblem, graph: UniverseGraph) -> VerifiedRoute | None:
+def construct_incumbent(
+    problem: RouteProblem, graph: UniverseGraph, *, deadline: float = math.inf
+) -> VerifiedRoute | None:
     optional_ids = {contract.contract_id for contract in problem.contracts}
     visits = build_greedy_route_hint(problem)
     if problem.active_shipments:
@@ -442,7 +459,12 @@ def construct_incumbent(problem: RouteProblem, graph: UniverseGraph) -> Verified
     simulation = simulate_and_verify(problem, graph, visits, ids)
     mandatory_only = replace(problem, contracts=(), scores=())
     visits, simulation = improve_incumbent(
-        problem, graph, visits, simulation, restart_visits=build_greedy_route_hint(mandatory_only)
+        problem,
+        graph,
+        visits,
+        simulation,
+        restart_visits=build_greedy_route_hint(mandatory_only),
+        deadline=deadline,
     )
     if not simulation.report.valid:
         return None
@@ -466,11 +488,11 @@ def diversify_incumbent(
     reward_ceiling: int | None,
     time_budget_seconds: float,
 ) -> VerifiedRoute:
-    """Explore different haul lanes and two-job replacements after bounded exact search.
+    """Explore different haul lanes and two-job replacements within a shared search budget.
 
     Only an unproven result with a master bound pays this cost. Every candidate is independently
     replayed; the neighborhood improves the final route, never eligibility or the rigorous ceiling.
-    The soft budget is checked between insertion passes, not inside the route verifier.
+    Check the budget within insertion passes; independent route replay remains atomic.
     """
     if problem.active_shipments or time_budget_seconds <= 0:
         return incumbent
@@ -491,7 +513,7 @@ def diversify_incumbent(
             if finished():
                 return
             _, candidate = insert_additional_contracts(
-                problem, graph, visits, simulation, candidate_order=order
+                problem, graph, visits, simulation, candidate_order=order, deadline=deadline
             )
             if (candidate.total_reward_units, -candidate.finish_seconds) > best.quality:
                 ids = tuple(
