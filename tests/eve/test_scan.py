@@ -19,11 +19,11 @@ from eve_courier_optimizer.domain import (
 )
 from eve_courier_optimizer.eve.contract_scan import scan_public_couriers
 from eve_courier_optimizer.eve.esi import EsiClient
-from eve_courier_optimizer.eve.http import HttpResponse
+from eve_courier_optimizer.eve.http import HttpResponse, RequestBudget
 from eve_courier_optimizer.eve.snapshot_file import read_snapshot, write_snapshot
 from eve_courier_optimizer.eve.zkill import ZkillClient
 from eve_courier_optimizer.routing.universe import Region, UniverseGraph
-from tests.conftest import make_contract, make_snapshot
+from tests.support.scenarios import make_contract, make_snapshot
 
 
 class OnePageTransport:
@@ -144,7 +144,9 @@ def test_scanner_uses_bounded_region_concurrency(
             self.active = 0
             self.peak = 0
 
-        def public_couriers(self, region_id: int) -> tuple[PublicCourierContract, ...]:
+        def public_couriers(
+            self, region_id: int, *, budget: RequestBudget | None = None
+        ) -> tuple[PublicCourierContract, ...]:
             del region_id
             with self.lock:
                 self.active += 1
@@ -223,6 +225,8 @@ def test_scanner_records_an_empty_but_successful_threat_observation(
             region_id: int,
             *,
             past_seconds: int = 86_400,
+            page: int = 1,
+            budget: RequestBudget | None = None,
         ) -> tuple[dict[str, object], ...]:
             assert region_id == 10
             assert past_seconds == 43_200
@@ -268,6 +272,8 @@ def test_scanner_can_collect_threats_for_a_distinct_transit_scope(
             region_id: int,
             *,
             past_seconds: int = 7_200,
+            page: int = 1,
+            budget: RequestBudget | None = None,
         ) -> tuple[dict[str, object], ...]:
             assert past_seconds == 7_200
             self.regions.append(region_id)

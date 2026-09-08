@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
+from http.client import IncompleteRead
 from pathlib import Path
 from typing import Final, cast
 from urllib.parse import urlencode
@@ -20,8 +21,11 @@ from eve_courier_optimizer.domain import (
     parse_esi_datetime,
 )
 from eve_courier_optimizer.eve.http import (
+    MAX_RESPONSE_BYTES,
     CacheEntry,
+    RequestBudget,
     ResponseCache,
+    ResponseLimitError,
     Transport,
     UrllibTransport,
     expiry_epoch,
@@ -58,6 +62,8 @@ class EsiClient:
         compatibility_date: str = ESI_COMPATIBILITY_DATE,
         timeout_seconds: float = 30.0,
         max_retries: int = 4,
+        operation_timeout_seconds: float = 300.0,
+        monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], float] = time.time,
     ) -> None:
@@ -65,6 +71,9 @@ class EsiClient:
             raise ValueError("ESI timeout must be finite and positive")
         if max_retries < 0:
             raise ValueError("ESI retry count cannot be negative")
+        RequestBudget.start(operation_timeout_seconds, monotonic)
+        self.operation_timeout_seconds = operation_timeout_seconds
+        self.monotonic = monotonic
         self.transport = transport or UrllibTransport()
         self.cache = cache
         self.user_agent = user_agent
@@ -75,8 +84,10 @@ class EsiClient:
         self.now = now
 
     def _get_json(
-        self, path: str, query: Mapping[str, int | str]
+        self, path: str, query: Mapping[str, int | str], *, budget: RequestBudget | None = None
     ) -> tuple[object, Mapping[str, str]]:
+        budget = budget or RequestBudget.start(self.operation_timeout_seconds, self.monotonic)
+        self._wait(budget, 0)
         encoded_query = urlencode(query)
         url = f"{ESI_BASE_URL}{path}"
         if encoded_query:
@@ -97,10 +108,15 @@ class EsiClient:
 
         for attempt in range(self.max_retries + 1):
             try:
-                response = self.transport.get(url, headers, self.timeout_seconds)
-            except OSError as error:
+                response = self.transport.get(
+                    url, headers, min(self.timeout_seconds, budget.remaining())
+                )
+                budget.remaining()
+            except ResponseLimitError as error:
+                raise EsiError(str(error)) from error
+            except (OSError, IncompleteRead) as error:
                 if attempt < self.max_retries:
-                    self.sleep(float(min(2**attempt, 8)))
+                    self._wait(budget, float(min(2**attempt, 8)))
                     continue
                 raise EsiError(f"ESI network request failed for {url}") from error
             if response.status == 304 and cached is not None:
@@ -133,7 +149,7 @@ class EsiClient:
                 retry_after = retry_delay(
                     response.headers.get("retry-after"), now_epoch=self.now(), default=1.0
                 )
-                self.sleep(retry_after)
+                self._wait(budget, retry_after)
                 continue
             if response.status == 420 and attempt < self.max_retries:
                 # Legacy ESI error-limit responses expose the reset delay under this header.
@@ -142,16 +158,24 @@ class EsiClient:
                     now_epoch=self.now(),
                     default=60.0,
                 )
-                self.sleep(reset_after)
+                self._wait(budget, reset_after)
                 continue
             if response.status >= 500 and attempt < self.max_retries:
-                self.sleep(min(2**attempt, 8))
+                self._wait(budget, min(2**attempt, 8))
                 continue
             raise EsiHttpError(response.status, url, response.body)
         raise AssertionError("retry loop must return or raise")
 
+    def _wait(self, budget: RequestBudget, delay: float) -> None:
+        try:
+            budget.wait(delay, self.sleep)
+        except TimeoutError as error:
+            raise EsiError(str(error)) from error
+
     @staticmethod
     def _parse_json(body: bytes) -> object:
+        if len(body) > MAX_RESPONSE_BYTES:
+            raise EsiError("ESI response exceeds the 16 MiB limit")
         try:
             return json.loads(body, parse_float=Decimal)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -161,27 +185,36 @@ class EsiClient:
         self,
         region_id: int,
         page: int,
+        *,
+        budget: RequestBudget | None = None,
     ) -> tuple[list[dict[str, object]], int]:
         if region_id <= 0 or page <= 0:
             raise ValueError("region_id and page must be positive")
-        payload, headers = self._get_json(f"/contracts/public/{region_id}/", {"page": page})
+        payload, headers = self._get_json(
+            f"/contracts/public/{region_id}/", {"page": page}, budget=budget
+        )
         if not isinstance(payload, list):
             raise EsiError("public-contract response was not a list")
         try:
             rows = [json_object(row, "public contract") for row in cast(list[object], payload)]
             pages = int(headers.get("x-pages", "1"))
-            if pages < 1:
-                raise ValueError("page count must be positive")
+            if not 1 <= pages <= 100:
+                raise ValueError("page count must be between 1 and 100")
         except ValueError as error:
             raise EsiError("invalid public-contract response") from error
         return rows, pages
 
-    def public_couriers(self, region_id: int) -> tuple[PublicCourierContract, ...]:
-        first_page, page_count = self.public_contract_page(region_id, 1)
+    def public_couriers(
+        self, region_id: int, *, budget: RequestBudget | None = None
+    ) -> tuple[PublicCourierContract, ...]:
+        budget = budget or RequestBudget.start(self.operation_timeout_seconds, self.monotonic)
+        first_page, page_count = self.public_contract_page(region_id, 1, budget=budget)
         rows = list(first_page)
+        if len(rows) > 100_000:
+            raise EsiError("public-contract observation exceeds 100,000 rows")
         for page in range(2, page_count + 1):
             try:
-                page_rows, _ = self.public_contract_page(region_id, page)
+                page_rows, _ = self.public_contract_page(region_id, page, budget=budget)
             except EsiHttpError as error:
                 if error.status == 404:
                     # The live contract set can shrink after page 1. A now-nonexistent trailing
@@ -190,6 +223,8 @@ class EsiClient:
                     break
                 raise
             rows.extend(page_rows)
+            if len(rows) > 100_000:
+                raise EsiError("contract region exceeds the 100,000-row collection limit")
         try:
             contracts = [
                 contract for row in rows if (contract := parse_public_courier(row)) is not None
@@ -200,14 +235,16 @@ class EsiClient:
         unique = {contract.contract_id: contract for contract in contracts}
         return tuple(unique[key] for key in sorted(unique))
 
-    def system_kills(self) -> tuple[SystemKillActivity, ...]:
+    def system_kills(
+        self, *, budget: RequestBudget | None = None
+    ) -> tuple[SystemKillActivity, ...]:
         """Fetch CCP's aggregate system-kill activity snapshot.
 
         ESI does not label suicide ganks. Consumers must treat ``ship_kills`` as a general danger
         proxy rather than attributing the underlying kills to a cause.
         """
 
-        payload, _headers = self._get_json("/universe/system_kills/", {})
+        payload, _headers = self._get_json("/universe/system_kills/", {}, budget=budget)
         if not isinstance(payload, list):
             raise EsiError("system-kills response was not a list")
         by_system: dict[int, SystemKillActivity] = {}

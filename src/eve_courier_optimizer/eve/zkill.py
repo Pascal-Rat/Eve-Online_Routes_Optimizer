@@ -8,6 +8,7 @@ it does not turn unrelated station, belt, structure, or NPC losses into route da
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import math
 import time
@@ -15,6 +16,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from http.client import IncompleteRead
 from pathlib import Path
 from typing import Any, Final, cast
 
@@ -25,8 +27,11 @@ from eve_courier_optimizer.domain import (
     parse_esi_datetime,
 )
 from eve_courier_optimizer.eve.http import (
+    MAX_RESPONSE_BYTES,
     CacheEntry,
+    RequestBudget,
     ResponseCache,
+    ResponseLimitError,
     Transport,
     UrllibTransport,
     retry_delay,
@@ -35,7 +40,9 @@ from eve_courier_optimizer.routing.universe import Stargate, UniverseGraph
 
 ZKILL_BASE_URL: Final = "https://zkillboard.com"
 ZKILL_MAX_PAST_SECONDS: Final = 604_800
-ZKILL_MAX_ROWS: Final = 1_000
+ZKILL_PAGE_SIZE: Final = 200
+DEFAULT_MAX_REGION_PAGES: Final = 10
+DEFAULT_MAX_COLLECTION_PAGES: Final = 100
 # Gate-danger mode is primarily an active-threat signal. Two hours keeps recent camps/ganks useful
 # without turning a kill from much earlier in the day into a current hard avoid. Operators can still
 # request up to seven days when they deliberately want a broader historical observation.
@@ -87,6 +94,8 @@ class ZkillClient:
         user_agent: str = DEFAULT_ZKILL_USER_AGENT,
         timeout_seconds: float = 30.0,
         max_retries: int = 3,
+        operation_timeout_seconds: float = 300.0,
+        monotonic: Callable[[], float] = time.monotonic,
         cache_seconds: int = DEFAULT_CACHE_SECONDS,
         request_spacing_seconds: float = DEFAULT_REQUEST_SPACING_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
@@ -100,6 +109,9 @@ class ZkillClient:
             raise ValueError("zKill cache lifetime must be positive")
         if not math.isfinite(request_spacing_seconds) or request_spacing_seconds < 0:
             raise ValueError("zKill request spacing cannot be negative")
+        RequestBudget.start(operation_timeout_seconds, monotonic)
+        self.operation_timeout_seconds = operation_timeout_seconds
+        self.monotonic = monotonic
         self.transport = transport or UrllibTransport()
         self.cache = cache
         self.user_agent = user_agent
@@ -113,40 +125,55 @@ class ZkillClient:
 
     @staticmethod
     def _body(response_body: bytes, headers: Mapping[str, str]) -> bytes:
+        if len(response_body) > MAX_RESPONSE_BYTES:
+            raise ZkillError("zKillboard response exceeds the 16 MiB limit")
         if headers.get("content-encoding", "").casefold() == "gzip":
             try:
-                return gzip.decompress(response_body)
-            except OSError as error:
+                with gzip.GzipFile(fileobj=io.BytesIO(response_body)) as stream:
+                    body = stream.read(MAX_RESPONSE_BYTES + 1)
+                if len(body) > MAX_RESPONSE_BYTES:
+                    raise ZkillError("zKillboard expanded response exceeds the 16 MiB limit")
+                return body
+            except (OSError, EOFError) as error:
                 raise ZkillError("zKillboard returned invalid gzip data") from error
         return response_body
 
     def defer_next_request(self) -> None:
         self._last_network_request_epoch = self.now()
 
-    def _space_request(self) -> None:
+    def _space_request(self, budget: RequestBudget) -> None:
         if self._last_network_request_epoch is None:
             return
         wait = self.request_spacing_seconds - (self.now() - self._last_network_request_epoch)
         if wait > 0:
-            self.sleep(wait)
+            self._wait(budget, wait)
 
     def region_losses(
         self,
         region_id: int,
         *,
         past_seconds: int = DEFAULT_THREAT_WINDOW_SECONDS,
+        page: int = 1,
+        budget: RequestBudget | None = None,
     ) -> tuple[dict[str, Any], ...]:
         """Fetch recent losses located in one region.
 
         zKill requires ``pastSeconds`` to be an hourly multiple and caps it at seven days. The
-        endpoint's 1,000-row ceiling is reported by the collection layer as incomplete coverage.
+        endpoint returns at most 200 newest-first rows per page. The collection layer owns
+        bounded pagination and reports incomplete coverage when a full page cannot be followed.
         """
 
+        budget = budget or RequestBudget.start(self.operation_timeout_seconds, self.monotonic)
+        self._wait(budget, 0)
+        if not 1 <= page <= 100:
+            raise ValueError("zKill page must be between 1 and 100")
         if region_id <= 0:
             raise ValueError("zKill region ID must be positive")
         if past_seconds <= 0 or past_seconds > ZKILL_MAX_PAST_SECONDS or past_seconds % 3_600 != 0:
             raise ValueError("zKill lookback must be an hourly multiple from 1 hour through 7 days")
         url = f"{ZKILL_BASE_URL}/api/losses/regionID/{region_id}/pastSeconds/{past_seconds}/"
+        if page != 1:
+            url += f"page/{page}/"
         cached = self.cache.get(url) if self.cache is not None else None
         if cached is not None and cached.expires_epoch > self.now():
             return self._parse_rows(cached.body)
@@ -157,13 +184,18 @@ class ZkillClient:
             "User-Agent": self.user_agent,
         }
         for attempt in range(self.max_retries + 1):
-            self._space_request()
+            self._space_request(budget)
             self._last_network_request_epoch = self.now()
             try:
-                response = self.transport.get(url, headers, self.timeout_seconds)
-            except OSError as error:
+                response = self.transport.get(
+                    url, headers, min(self.timeout_seconds, budget.remaining())
+                )
+                budget.remaining()
+            except ResponseLimitError as error:
+                raise ZkillError(str(error)) from error
+            except (OSError, IncompleteRead) as error:
                 if attempt < self.max_retries:
-                    self.sleep(float(min(2**attempt, 8)))
+                    self._wait(budget, float(min(2**attempt, 8)))
                     continue
                 raise ZkillError(f"zKillboard network request failed for {url}") from error
             body = self._body(response.body, response.headers)
@@ -181,31 +213,39 @@ class ZkillClient:
                     )
                 return rows
             if response.status == 429 and attempt < self.max_retries:
-                self.sleep(
+                self._wait(
+                    budget,
                     retry_delay(
                         response.headers.get("retry-after"), now_epoch=self.now(), default=5.0
-                    )
+                    ),
                 )
                 continue
             if response.status >= 500 and attempt < self.max_retries:
-                self.sleep(float(min(2**attempt, 8)))
+                self._wait(budget, float(min(2**attempt, 8)))
                 continue
             raise ZkillHttpError(response.status, url, body)
         raise AssertionError("zKill retry loop must return or raise")
 
+    def _wait(self, budget: RequestBudget, delay: float) -> None:
+        try:
+            budget.wait(delay, self.sleep)
+        except TimeoutError as error:
+            raise ZkillError(str(error)) from error
+
     @staticmethod
     def _parse_rows(body: bytes) -> tuple[dict[str, Any], ...]:
+        if len(body) > MAX_RESPONSE_BYTES:
+            raise ZkillError("zKillboard response exceeds the 16 MiB limit")
         try:
             payload = json.loads(body, parse_float=Decimal)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise ZkillError("zKillboard response was not valid JSON") from error
         if not isinstance(payload, list):
             raise ZkillError("zKillboard region response was not a list")
-        return tuple(
-            cast(dict[str, Any], row)
-            for row in cast(list[object], payload)
-            if isinstance(row, dict)
-        )
+        rows = cast(list[object], payload)
+        if any(not isinstance(row, dict) for row in rows):
+            raise ZkillError("zKillboard region response contains a malformed row")
+        return tuple(cast(dict[str, Any], row) for row in rows)
 
 
 def _positive_ids(values: Iterable[object]) -> tuple[int, ...]:
@@ -376,9 +416,14 @@ def collect_gate_threat_intel(
     window_seconds: int = DEFAULT_THREAT_WINDOW_SECONDS,
     gate_radius_m: int = DEFAULT_GATE_RADIUS_M,
     clock: Callable[[], datetime] | None = None,
+    max_region_pages: int = DEFAULT_MAX_REGION_PAGES,
+    max_collection_pages: int = DEFAULT_MAX_COLLECTION_PAGES,
 ) -> ThreatIntelCollection:
     """Collect a bounded, auditable gate-threat observation for selected regions."""
 
+    if not 1 <= max_region_pages <= 100 or max_collection_pages < 1:
+        raise ValueError("threat collection page budgets must be positive; at most 100 per region")
+    budget = RequestBudget.start(client.operation_timeout_seconds, client.monotonic)
     if gate_radius_m < 0:
         raise ValueError("gate radius cannot be negative")
     now = (clock or (lambda: datetime.now(UTC)))()
@@ -389,26 +434,46 @@ def collect_gate_threat_intel(
     coverage: list[int] = []
     incomplete: set[int] = set()
     events_by_id: dict[int, GateThreatEvent] = {}
-    killmails_seen = 0
+    seen_ids: set[int] = set()
+    pages_requested = 0
     for region_id in sorted(set(region_ids)):
-        try:
-            rows = client.region_losses(region_id, past_seconds=window_seconds)
-        except ZkillError:
-            incomplete.add(region_id)
-            continue
-        coverage.append(region_id)
-        killmails_seen += len(rows)
-        if len(rows) >= ZKILL_MAX_ROWS:
-            incomplete.add(region_id)
-        for row in rows:
-            event = classify_gate_threat(
-                row,
-                graph,
-                maximum_distance_m=gate_radius_m,
-            )
-            if event is None or event.occurred_at < cutoff or event.occurred_at > observed_at:
-                continue
-            events_by_id[event.killmail_id] = event
+        region_seen: set[int] = set()
+        for page in range(1, max_region_pages + 1):
+            if pages_requested >= max_collection_pages:
+                incomplete.add(region_id)
+                break
+            pages_requested += 1
+            try:
+                rows = client.region_losses(
+                    region_id, past_seconds=window_seconds, page=page, budget=budget
+                )
+            except ZkillError:
+                incomplete.add(region_id)
+                break
+            if page == 1:
+                coverage.append(region_id)
+            before = len(region_seen)
+            for row in rows:
+                killmail_id = row.get("killmail_id")
+                if type(killmail_id) is not int or killmail_id <= 0:
+                    incomplete.add(region_id)
+                    continue
+                seen_ids.add(killmail_id)
+                region_seen.add(killmail_id)
+                event = classify_gate_threat(row, graph, maximum_distance_m=gate_radius_m)
+                if event is None or event.occurred_at < cutoff or event.occurred_at > observed_at:
+                    continue
+                events_by_id[event.killmail_id] = event
+            if len(rows) < ZKILL_PAGE_SIZE:
+                break
+            if (
+                len(rows) > ZKILL_PAGE_SIZE
+                or len(region_seen) == before
+                or page == max_region_pages
+            ):
+                # Oversized/repeated pages cannot establish complete traversal. Keep observations.
+                incomplete.add(region_id)
+                break
     return ThreatIntelCollection(
         fetched_at=observed_at,
         window_seconds=window_seconds,
@@ -418,7 +483,7 @@ def collect_gate_threat_intel(
         events=tuple(
             sorted(events_by_id.values(), key=lambda item: (item.occurred_at, item.killmail_id))
         ),
-        killmails_seen=killmails_seen,
+        killmails_seen=len(seen_ids),
     )
 
 

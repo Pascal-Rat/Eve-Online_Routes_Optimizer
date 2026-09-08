@@ -5,14 +5,80 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from contextlib import closing
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
+from http.client import IncompleteRead
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
+
+class ResponseLimitError(OSError):
+    """A response exceeds the permitted resource budget; retrying cannot repair it."""
+
+
+@dataclass(frozen=True, slots=True)
+class RequestBudget:
+    """One monotonic deadline shared by retries and sequential or concurrent requests."""
+
+    deadline: float
+    monotonic: Callable[[], float] = time.monotonic
+
+    @classmethod
+    def start(
+        cls, seconds: float, monotonic: Callable[[], float] = time.monotonic
+    ) -> RequestBudget:
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError("network budget must be finite and positive")
+        return cls(monotonic() + seconds, monotonic)
+
+    def remaining(self) -> float:
+        remaining = self.deadline - self.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("network operation exceeded its overall time budget")
+        return remaining
+
+    def wait(self, delay: float, sleep: Callable[[float], None]) -> None:
+        if delay >= self.remaining():
+            raise TimeoutError("provider retry delay exceeds the time budget; try again later")
+        if delay > 0:
+            sleep(delay)
+        self.remaining()
+
+
+@runtime_checkable
+class _ResponseBody(Protocol):
+    def read1(self, size: int, /) -> bytes: ...
+
+
+def read_response_body(
+    response: _ResponseBody, headers: Mapping[str, str], budget: RequestBudget
+) -> bytes:
+    expected = headers.get("content-length")
+    length = int(expected) if expected is not None and expected.isdecimal() else None
+    if length is not None and length > MAX_RESPONSE_BYTES:
+        raise ResponseLimitError("HTTP response exceeds the 16 MiB body limit")
+    body = bytearray()
+    try:
+        while True:
+            budget.remaining()
+            chunk = response.read1(min(64 * 1024, MAX_RESPONSE_BYTES + 1 - len(body)))
+            if not chunk:
+                break
+            body.extend(chunk)
+            if len(body) > MAX_RESPONSE_BYTES:
+                raise ResponseLimitError("HTTP response exceeds the 16 MiB body limit")
+    except IncompleteRead as error:
+        raise OSError("HTTP response ended before its body was complete") from error
+    if length is not None and len(body) != length:
+        raise OSError("HTTP response ended before its declared Content-Length")
+    return bytes(body)
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,14 +97,19 @@ class UrllibTransport:
 
     def get(self, url: str, headers: Mapping[str, str], timeout_seconds: float) -> HttpResponse:
         request = Request(url, headers=dict(headers), method="GET")
+        budget = RequestBudget.start(timeout_seconds)
         try:
             with closing(urlopen(request, timeout=timeout_seconds)) as response:  # noqa: S310
                 response_headers = {key.lower(): value for key, value in response.headers.items()}
-                return HttpResponse(int(response.status), response_headers, response.read())
+                body = read_response_body(response, response_headers, budget)
+                return HttpResponse(int(response.status), response_headers, body)
         except HTTPError as error:
             with closing(error):
                 response_headers = {key.lower(): value for key, value in error.headers.items()}
-                return HttpResponse(int(error.code), response_headers, error.read())
+                if not isinstance(error.fp, _ResponseBody):
+                    raise OSError("HTTP error response has no readable body") from error
+                body = read_response_body(error.fp, response_headers, budget)
+                return HttpResponse(int(error.code), response_headers, body)
 
 
 @dataclass(frozen=True, slots=True)

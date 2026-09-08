@@ -66,7 +66,10 @@ def test_public_courier_pagination_and_filtering() -> None:
     assert [item.contract_id for item in contracts] == [1, 2]
     assert contracts[0].volume_units == 12_345
     assert contracts[0].reward_units == 5_000_000
-    assert len(transport.calls) == 2
+    assert [url for url, _ in transport.calls] == [
+        "https://esi.evetech.net/contracts/public/10/?page=1",
+        "https://esi.evetech.net/contracts/public/10/?page=2",
+    ]
 
 
 def test_cache_avoids_repeated_request(tmp_path: Path) -> None:

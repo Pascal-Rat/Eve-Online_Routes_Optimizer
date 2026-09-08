@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from eve_courier_optimizer.domain import GateEvidence, ThreatCategory
-from eve_courier_optimizer.eve.http import HttpResponse, ResponseCache
+from eve_courier_optimizer.eve.http import HttpResponse, RequestBudget, ResponseCache
 from eve_courier_optimizer.eve.zkill import (
     ZkillClient,
     ZkillError,
@@ -249,6 +249,8 @@ def test_collection_records_partial_coverage_and_system_thresholds(
             region_id: int,
             *,
             past_seconds: int = 86_400,
+            page: int = 1,
+            budget: RequestBudget | None = None,
         ) -> tuple[dict[str, object], ...]:
             del past_seconds
             if region_id == 20:
@@ -293,6 +295,8 @@ def test_collection_marks_a_saturated_region_incomplete(
             region_id: int,
             *,
             past_seconds: int = 86_400,
+            page: int = 1,
+            budget: RequestBudget | None = None,
         ) -> tuple[dict[str, object], ...]:
             del region_id, past_seconds
             return tuple(killmail() for _ in range(1_000))
@@ -303,6 +307,59 @@ def test_collection_marks_a_saturated_region_incomplete(
         [10],
         clock=lambda: datetime(2026, 8, 5, 12, 0, tzinfo=UTC),
     )
-    assert collection.killmails_seen == 1_000
+    assert collection.killmails_seen == 1  # Repeated IDs are counted once.
     assert collection.incomplete_region_ids == (10,)
     assert len(collection.events) == 1
+
+
+@pytest.mark.parametrize("first_page_size", [199, 200])
+def test_collection_follows_full_200_row_pages_and_deduplicates(
+    threat_graph: UniverseGraph, first_page_size: int
+) -> None:
+    graph = UniverseGraph(
+        systems=threat_graph.systems,
+        adjacency=threat_graph.adjacency,
+        station_systems=threat_graph.station_systems,
+        regions=threat_graph.regions,
+        metadata=threat_graph.metadata,
+        gates={**threat_graph.gates, 501: Stargate(501, 2, 0, 0, 0)},
+    )
+    rows = [{**killmail(), "killmail_id": i + 1} for i in range(first_page_size)]
+    new_system = {**killmail(location_id=501), "killmail_id": 201, "solar_system_id": 2}
+    transport = SequenceTransport(
+        [HttpResponse(200, {}, json.dumps(page).encode()) for page in (rows, [rows[0], new_system])]
+    )
+    result = collect_gate_threat_intel(
+        ZkillClient(transport=transport, request_spacing_seconds=0),
+        graph,
+        (10,),
+        clock=lambda: datetime(2026, 8, 5, 12, tzinfo=UTC),
+    )
+    assert result.incomplete_region_ids == ()
+    assert transport.calls == (2 if first_page_size == 200 else 1)
+    assert result.killmails_seen == (201 if first_page_size == 200 else 199)
+    assert {event.system_id for event in result.events} == (
+        {1, 2} if first_page_size == 200 else {1}
+    )
+
+
+@pytest.mark.parametrize("stop", ["upstream", "region_budget", "collection_budget"])
+def test_full_page_retains_observations_and_marks_unfinished_regions(
+    threat_graph: UniverseGraph, stop: str
+) -> None:
+    rows = [{**killmail(), "killmail_id": i + 1} for i in range(200)]
+    transport = SequenceTransport(
+        [HttpResponse(200, {}, json.dumps(rows).encode()), HttpResponse(503, {}, b"unavailable")]
+    )
+    result = collect_gate_threat_intel(
+        ZkillClient(transport=transport, request_spacing_seconds=0, max_retries=0),
+        threat_graph,
+        (10,),
+        clock=lambda: datetime(2026, 8, 5, 12, tzinfo=UTC),
+        max_region_pages=1 if stop == "region_budget" else 10,
+        max_collection_pages=1 if stop == "collection_budget" else 100,
+    )
+    assert result.coverage_region_ids == (10,)
+    assert result.incomplete_region_ids == (10,)
+    assert result.killmails_seen == 200
+    assert len(result.events) == 200

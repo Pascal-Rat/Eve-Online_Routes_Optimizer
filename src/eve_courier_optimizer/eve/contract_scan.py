@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from functools import partial
 from typing import Final
 
 from eve_courier_optimizer.domain import ContractSnapshot, PublicCourierContract, SystemKillActivity
 from eve_courier_optimizer.eve.esi import ESI_COMPATIBILITY_DATE, EsiClient, EsiError
+from eve_courier_optimizer.eve.http import RequestBudget
 from eve_courier_optimizer.eve.zkill import (
     DEFAULT_GATE_RADIUS_M,
     DEFAULT_THREAT_WINDOW_SECONDS,
@@ -27,6 +29,7 @@ def _scan_contract_regions(
     region_ids: tuple[int, ...],
     *,
     workers: int,
+    budget: RequestBudget,
     progress: Callable[[str], None] | None = None,
 ) -> dict[int, tuple[PublicCourierContract, ...]]:
     """Fetch independent ESI regions concurrently while pagination stays sequential per region."""
@@ -37,7 +40,7 @@ def _scan_contract_regions(
         max_workers=min(workers, len(region_ids)),
         thread_name_prefix="esi-courier-region",
     ) as executor:
-        values = executor.map(client.public_couriers, region_ids)
+        values = executor.map(partial(client.public_couriers, budget=budget), region_ids)
         contracts: dict[int, tuple[PublicCourierContract, ...]] = {}
         for index, (region_id, rows) in enumerate(zip(region_ids, values, strict=True), 1):
             contracts[region_id] = rows
@@ -87,6 +90,7 @@ def scan_public_couriers(
     if include_threat_intel and not threat_regions:
         raise ValueError("at least one threat region is required when threat intel is enabled")
 
+    budget = RequestBudget.start(client.operation_timeout_seconds, client.monotonic)
     contracts_by_id: dict[int, PublicCourierContract] = {}
     if progress:
         progress("Scanning public contract regions")
@@ -94,6 +98,7 @@ def scan_public_couriers(
         client,
         regions,
         workers=contract_workers,
+        budget=budget,
         progress=progress,
     )
     for region_id in regions:
@@ -103,7 +108,7 @@ def scan_public_couriers(
     activity_available = False
     if include_system_kills:
         try:
-            activity = client.system_kills()
+            activity = client.system_kills(budget=budget)
             activity_available = True
         except EsiError:
             # This feed is advisory. Public courier discovery remains useful when it is unavailable.

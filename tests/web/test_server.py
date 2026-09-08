@@ -19,7 +19,7 @@ import eve_courier_optimizer.web.server as webapp_module
 from eve_courier_optimizer.cli import main
 from eve_courier_optimizer.domain import GateEvidence, GateThreatEvent, SolveResult, ThreatCategory
 from eve_courier_optimizer.eve.esi import EsiClient, EsiError
-from eve_courier_optimizer.eve.http import HttpResponse
+from eve_courier_optimizer.eve.http import HttpResponse, RequestBudget
 from eve_courier_optimizer.eve.zkill import ZkillClient
 from eve_courier_optimizer.routing.universe import Region, UniverseGraph
 from eve_courier_optimizer.web.server import asset, create_http_server, run_local_web_ui
@@ -399,6 +399,8 @@ def test_web_scan_scopes_zkill_to_proof_safe_route_reachable_regions(
             region_id: int,
             *,
             past_seconds: int = 7_200,
+            page: int = 1,
+            budget: RequestBudget | None = None,
         ) -> tuple[dict[str, object], ...]:
             assert past_seconds == 7_200
             self.regions.append(region_id)
