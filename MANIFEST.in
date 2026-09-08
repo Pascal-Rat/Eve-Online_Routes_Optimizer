@@ -5,11 +5,10 @@ include docs/assets/ui-planner.png
 include benchmarks/*.py
 include benchmarks/frozen_universe.json benchmarks/empire_snapshot_2026-08-06.json
 include benchmarks/empire_fixture_manifest.json benchmarks/empire_sde_3458726.sqlite3.gz
-recursive-include tests *.py
-recursive-include browser_tests *.py
+recursive-include tests *.py *.js *.json
 include tools/*.py
 include package.json package-lock.json jsconfig.json
-recursive-include browser_unit_tests *.js *.json
 recursive-include src/eve_courier_optimizer/web/assets *.d.ts
 prune benchmarks/results
+prune .vscode
 global-exclude __pycache__ *.py[cod]

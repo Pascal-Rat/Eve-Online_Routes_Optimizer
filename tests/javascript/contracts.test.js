@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { decode } from "../src/eve_courier_optimizer/web/assets/contract_validation.js";
-import { api, ApiError } from "../src/eve_courier_optimizer/web/assets/api.js";
+import { decode } from "../../src/eve_courier_optimizer/web/assets/contract_validation.js";
+import { api, ApiError } from "../../src/eve_courier_optimizer/web/assets/api.js";
 
-const running = { id: "review-job", operation: "solve", status: "running", progress: "Solving", elapsed_seconds: 0 };
+const running = { id: "solve-job", operation: "solve", status: "running", progress: "Solving", elapsed_seconds: 0 };
 // Complete response captured from a synthetic Alpha-to-Beta solve; no schema-generated defaults.
 const planResponse = JSON.parse(readFileSync(new URL("./fixtures/route-response.json", import.meta.url), "utf8"));
 

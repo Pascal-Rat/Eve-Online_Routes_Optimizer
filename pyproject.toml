@@ -64,7 +64,7 @@ show_error_codes = true
 exclude = ["^benchmarks/results/"]
 
 [tool.pyright]
-include = ["src", "tools", "tests", "benchmarks", "browser_tests"]
+include = ["src", "tools", "tests", "benchmarks"]
 exclude = ["benchmarks/results"]
 extraPaths = ["src", "."]
 pythonVersion = "3.12"
@@ -76,7 +76,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers --cov=eve_courier_optimizer --cov-report=term-missing"
-testpaths = ["tests"]
+testpaths = ["tests/python"]
 markers = [
     "live: opt-in tests that call CCP ESI",
 ]

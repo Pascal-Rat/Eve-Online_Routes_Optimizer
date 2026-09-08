@@ -76,21 +76,30 @@ windows at least 1024 pixels wide and has no frontend build step.
 
 ## Validate your change
 
+All suites live under `tests/`; their separate runners keep fast checks independent of Chromium.
+
+| Directory | What it checks | Command |
+| --- | --- | --- |
+| `tests/python/` | Python rules, solver results, persistence, HTTP and release integration | `.venv/bin/pytest` |
+| `tests/javascript/` | JavaScript response validation and request handling, using Node.js | `npm test` |
+| `tests/browser/` | Complete user workflows in Chromium | `.venv/bin/pytest tests/browser --no-cov --browser chromium` |
+| `tests/support/` | Shared synthetic scenarios, clocks and network fakes | Used by the Python and browser suites |
+
 For documentation changes, check the rendered Markdown, local links and example commands. For
 behavior changes, run the relevant tests first, then the checks affected by the change. The full
 validation sequence is:
 
 ```bash
-.venv/bin/ruff check src tools tests benchmarks browser_tests
-.venv/bin/ruff format --check src tools tests benchmarks browser_tests
-.venv/bin/mypy src tools tests benchmarks browser_tests
+.venv/bin/ruff check src tools tests benchmarks
+.venv/bin/ruff format --check src tools tests benchmarks
+.venv/bin/mypy src tools tests benchmarks
 .venv/bin/pyright --pythonpath .venv/bin/python
 npm ci --ignore-scripts
 .venv/bin/python tools/generate_web_contracts.py --check
 npm run check
 npm test
 .venv/bin/pytest
-.venv/bin/pytest browser_tests --no-cov --browser chromium --tracing retain-on-failure
+.venv/bin/pytest tests/browser --no-cov --browser chromium --tracing retain-on-failure
 .venv/bin/python -m benchmarks.run_frozen --time-limit 10
 .venv/bin/python -m benchmarks.run_empire --time-limit 60 --workers 4
 .venv/bin/python -m pip install build

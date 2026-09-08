@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 from playwright.sync_api import Page, expect
 
-from browser_tests.conftest import WebSession
+from tests.browser.conftest import WebSession
 from tests.support.scenarios import make_contract, make_snapshot
 from tests.support.web import SlowTransport, planning_payload, proposal_input, seed_snapshot
 
