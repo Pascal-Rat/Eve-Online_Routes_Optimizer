@@ -9,9 +9,11 @@ claim of optimality over the full snapshot.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from math import inf
+from types import MappingProxyType
 
 from eve_courier_optimizer.domain import (
     ActiveShipment,
@@ -42,9 +44,23 @@ class RouteProblem:
     constraints: PlanningConstraints
     contracts: tuple[RoutableContract, ...]
     scope: ProblemScope
-    jump_matrix: dict[tuple[int, int], int]
+    jump_matrix: Mapping[tuple[int, int], int]
     scores: tuple[SingleContractScore, ...]
     active_shipments: tuple[ActiveShipment, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "jump_matrix", MappingProxyType(dict(self.jump_matrix)))
+
+    def __reduce__(self) -> tuple[object, tuple[object, ...]]:
+        # Spawn workers reconstruct an owned read-only matrix; mapping proxies cannot be pickled.
+        return type(self), (
+            self.constraints,
+            self.contracts,
+            self.scope,
+            dict(self.jump_matrix),
+            self.scores,
+            self.active_shipments,
+        )
 
     @property
     def committed_reward_units(self) -> int:

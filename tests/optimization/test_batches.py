@@ -16,8 +16,8 @@ from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.universe import UniverseGraph
 from eve_courier_optimizer.verification.exhaustive_optimum import solve_exhaustively
 from eve_courier_optimizer.verification.route_replay import simulate_and_verify
-from tests.conftest import make_contract, make_snapshot
-from tests.optimization.test_reward_bounds import constraints
+from tests.support.scenarios import make_contract, make_snapshot
+from tests.support.scenarios import reward_constraints as constraints
 
 
 def test_batches_match_exhaustive_optima_across_route_shapes(

@@ -86,12 +86,8 @@ def measure(case: str, *, seed: int) -> dict[str, object]:
         "peak_resident_bytes": peak_resident_bytes(),
     }
     started = time.perf_counter()
-    route.hint(simulation.visits, incumbent.selected_contract_ids)
-    master.hint(
-        incumbent.selected_contract_ids,
-        tuple(leg.to_system_id for leg in simulation.travel_legs),
-        simulation.total_reward_units,
-    )
+    route.install_incumbent(incumbent)
+    master.install_incumbent(incumbent)
     row["hints"] = time.perf_counter() - started
     row["hinted_event_sha256"] = hashlib.sha256(str(route.model.proto).encode()).hexdigest()
     row["hinted_master_sha256"] = hashlib.sha256(str(master.model.proto).encode()).hexdigest()

@@ -13,10 +13,8 @@ from eve_courier_optimizer.domain import (
     ActionKind,
     CollateralMode,
     PlannedAction,
-    PlanningConstraints,
     ProofStatus,
     PublicCourierContract,
-    SecurityPolicy,
     TravelTimeModel,
 )
 from eve_courier_optimizer.optimization import RouteOptimizer, SolverConfig
@@ -27,26 +25,8 @@ from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.universe import UniverseGraph
 from eve_courier_optimizer.verification.exhaustive_optimum import solve_exhaustively
 from eve_courier_optimizer.verification.route_replay import simulate_and_verify
-from tests.conftest import make_contract, make_snapshot
-
-
-def constraints(
-    now: datetime,
-    *,
-    horizon: int = 100,
-    collateral: int = 1_000,
-    mode: CollateralMode = CollateralMode.LOCKED,
-) -> PlanningConstraints:
-    return PlanningConstraints(
-        start_system_id=1,
-        cargo_capacity_units=100,
-        collateral_budget_units=collateral,
-        horizon_seconds=horizon,
-        snapshot_time=now,
-        collateral_mode=mode,
-        travel=TravelTimeModel(seconds_per_jump=10, service_seconds=1),
-        security=SecurityPolicy(0.45),
-    )
+from tests.support.scenarios import make_contract, make_snapshot
+from tests.support.scenarios import reward_constraints as constraints
 
 
 def test_system_relaxation_preserves_shared_route_value(

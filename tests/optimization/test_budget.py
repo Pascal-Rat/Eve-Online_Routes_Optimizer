@@ -15,8 +15,8 @@ from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.universe import UniverseGraph
 from eve_courier_optimizer.verification.exhaustive_optimum import solve_exhaustively
 from eve_courier_optimizer.verification.route_replay import VerifiedRoute
-from tests.conftest import make_contract, make_snapshot
-from tests.optimization.test_optimizer import constraints
+from tests.support.scenarios import make_contract, make_snapshot
+from tests.support.scenarios import optimizer_constraints as constraints
 
 
 def test_budget_uses_one_deadline_and_caps_each_phase(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -47,6 +47,7 @@ class SimulationResult:
 class VerifiedRoute:
     selected_contract_ids: tuple[int, ...]
     simulation: SimulationResult
+    problem: RouteProblem
 
     def __post_init__(self) -> None:
         if not self.simulation.report.valid:
@@ -70,7 +71,12 @@ class VerifiedRoute:
                 "solver route failed independent verification: "
                 + "; ".join(simulation.report.violations)
             )
-        return cls(selected_contract_ids, simulation)
+        return cls(selected_contract_ids, simulation, problem)
+
+    def require_problem(self, problem: RouteProblem) -> None:
+        """A feasible reward floor is valid only for the problem that was independently replayed."""
+        if self.problem != problem:
+            raise ValueError("verified incumbent belongs to a different route problem")
 
 
 @dataclass(slots=True)

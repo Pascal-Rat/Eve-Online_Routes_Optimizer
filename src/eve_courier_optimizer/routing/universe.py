@@ -205,7 +205,7 @@ class UniverseGraph:
     def from_sqlite(cls, path: Path) -> UniverseGraph:
         if not path.exists():
             raise FileNotFoundError(f"SDE route database not found: {path}")
-        uri = f"file:{path.resolve()}?mode=ro"
+        uri = path.resolve().as_uri() + "?mode=ro"
         with closing(sqlite3.connect(uri, uri=True)) as connection:
             system_rows = connection.execute(
                 "SELECT system_id, region_id, name, security_status FROM systems"

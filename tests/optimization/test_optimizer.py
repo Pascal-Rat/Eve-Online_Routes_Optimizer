@@ -12,11 +12,9 @@ from eve_courier_optimizer.domain import (
     ActiveShipment,
     CollateralMode,
     PlannedAction,
-    PlanningConstraints,
     ProofStatus,
     PublicCourierContract,
     RoutableContract,
-    SecurityPolicy,
     TravelLegKind,
     TravelTimeModel,
 )
@@ -26,27 +24,8 @@ from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.universe import UniverseGraph
 from eve_courier_optimizer.verification.exhaustive_optimum import solve_exhaustively
 from eve_courier_optimizer.verification.route_replay import simulate_and_verify
-from tests.conftest import make_contract, make_snapshot
-
-
-def constraints(
-    now: datetime,
-    *,
-    cargo: int = 20,
-    collateral: int = 200,
-    mode: CollateralMode = CollateralMode.LOCKED,
-    horizon: int = 1_000,
-) -> PlanningConstraints:
-    return PlanningConstraints(
-        start_system_id=1,
-        cargo_capacity_units=cargo,
-        collateral_budget_units=collateral,
-        horizon_seconds=horizon,
-        snapshot_time=now,
-        collateral_mode=mode,
-        travel=TravelTimeModel(10, 1),
-        security=SecurityPolicy(0.45),
-    )
+from tests.support.scenarios import make_contract, make_snapshot
+from tests.support.scenarios import optimizer_constraints as constraints
 
 
 def exact(problem: RouteProblem, graph: UniverseGraph) -> object:

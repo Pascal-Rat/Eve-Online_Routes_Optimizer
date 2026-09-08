@@ -22,6 +22,7 @@ from eve_courier_optimizer.optimization.models.selection_bounds import (
     add_selection_cuts,
 )
 from eve_courier_optimizer.routing.route_problem import RouteProblem
+from eve_courier_optimizer.verification.route_replay import VerifiedRoute
 
 _START: Final = "start"
 _END: Final = "end"
@@ -55,6 +56,31 @@ class EventCatalog:
     committed_pickups: dict[int, int]
     committed_deliveries: dict[int, int]
     waypoints: tuple[int, ...]
+
+    def incumbent_nodes(self, visits: tuple[PlannedVisit, ...]) -> list[int]:
+        """Project visits into this catalog, shortcutting waypoints guaranteed by the endpoints."""
+        action_nodes = {
+            (e.action_kind, e.contract_id): e.node_id
+            for e in self.events
+            if e.action_kind is not None
+        }
+        waypoint_nodes = {self.events[node].system_id: node for node in self.waypoints}
+        guaranteed = {self.events[_START_NODE_ID].system_id, self.events[_END_NODE_ID].system_id}
+        nodes = [_START_NODE_ID]
+        for visit in visits:
+            if isinstance(visit, PlannedAction):
+                node = action_nodes[visit.action, visit.contract_id]
+                waypoint = waypoint_nodes.get(self.events[node].system_id)
+                if waypoint is not None and waypoint not in nodes:
+                    nodes.append(waypoint)
+            elif visit.system_id in guaranteed:
+                continue
+            else:
+                node = waypoint_nodes[visit.system_id]
+            if node not in nodes:
+                nodes.append(node)
+        nodes.append(_END_NODE_ID)
+        return nodes
 
 
 def _build_route_event_catalog(problem: RouteProblem) -> EventCatalog:
@@ -730,30 +756,11 @@ class PickupDeliveryModel:
                 int(contract_id in suggested_contract_ids),
             )
 
-    def hint(
-        self,
-        visits: tuple[PlannedVisit, ...],
-        selected_ids: tuple[int, ...],
-    ) -> None:
-        """Give CP-SAT a complete assignment, not just contract-selection suggestions."""
-        action_nodes = {
-            (e.action_kind, e.contract_id): e.node_id
-            for e in self.events
-            if e.action_kind is not None
-        }
-        waypoint_nodes = {e.system_id: e.node_id for e in self.events[2:] if e.action_kind is None}
-        nodes = [self.start_node_id]
-        for visit in visits:
-            if isinstance(visit, PlannedAction):
-                node = action_nodes[visit.action, visit.contract_id]
-                waypoint = waypoint_nodes.get(self.events[node].system_id)
-                if waypoint is not None and waypoint not in nodes:
-                    nodes.append(waypoint)
-            else:
-                node = waypoint_nodes[visit.system_id]
-            if node not in nodes:
-                nodes.append(node)
-        nodes.append(self.end_node_id)
+    def install_incumbent(self, incumbent: VerifiedRoute) -> None:
+        """Install a complete assignment and a hard reward floor from a verified route."""
+        incumbent.require_problem(self.problem)
+        nodes = self.catalog.incumbent_nodes(incumbent.simulation.visits)
+        selected_ids = incumbent.selected_contract_ids
         used_arcs = set(zip(nodes, nodes[1:], strict=False))
         used_arcs.add((self.end_node_id, self.start_node_id))
         if not used_arcs <= self.arc_is_used.keys():

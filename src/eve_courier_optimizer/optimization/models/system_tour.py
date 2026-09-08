@@ -18,6 +18,7 @@ from eve_courier_optimizer.optimization.models.selection_bounds import (
     integer_upper_bound,
 )
 from eve_courier_optimizer.routing.route_problem import RouteProblem
+from eve_courier_optimizer.verification.route_replay import VerifiedRoute
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,10 +50,12 @@ class SystemTourModel:
     resource_crossings: tuple[ResourceCrossings, ...]
     start_system_id: int
     terminal_system_id: int | None
+    problem: RouteProblem
 
     def __init__(
         self, problem: RouteProblem, *, selection_cuts: SelectionCuts | None = None
     ) -> None:
+        self.problem = problem
         """Build the endpoint-system route relaxation while retaining its selection literals.
 
         Every exact route maps here by shortcutting repeated endpoint visits through the metric
@@ -211,10 +214,12 @@ class SystemTourModel:
         self.system_is_visited = system_is_visited
         self.system_is_skipped = skipped
 
-    def hint(
-        self, contract_ids: tuple[int, ...], system_order: tuple[int, ...], reward: int
-    ) -> None:
-        """Shortcut an independently feasible route into a complete master hint."""
+    def install_incumbent(self, incumbent: VerifiedRoute) -> None:
+        """Project a verified route and install its reward as a hard lower bound."""
+        incumbent.require_problem(self.problem)
+        contract_ids = incumbent.selected_contract_ids
+        system_order = tuple(leg.to_system_id for leg in incumbent.simulation.travel_legs)
+        reward = incumbent.simulation.total_reward_units
         node_by_system = {
             system: node for node, system in self.system_id_by_node_id.items() if node >= 2
         }

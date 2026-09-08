@@ -142,7 +142,9 @@ class RouteOptimizer:
             deadline=budget.deadline,
         )
         if refinement.simulation is not None:
-            search.consider(VerifiedRoute(refinement.selected_contract_ids, refinement.simulation))
+            search.consider(
+                VerifiedRoute(refinement.selected_contract_ids, refinement.simulation, self.problem)
+            )
         return replace(
             proof,
             subproblem_wall_time_seconds=(
@@ -174,7 +176,7 @@ class RouteOptimizer:
         for cut in proof.learned_reward_cuts:
             add_subset_reward_cut(route.model, route.contract_is_selected, cut)
         if incumbent is not None:
-            route.hint(incumbent.simulation.visits, incumbent.selected_contract_ids)
+            route.install_incumbent(incumbent)
         validation_error = route.model.validate()
         if validation_error:
             raise ValueError(f"invalid or numerically unsafe CP-SAT model: {validation_error}")

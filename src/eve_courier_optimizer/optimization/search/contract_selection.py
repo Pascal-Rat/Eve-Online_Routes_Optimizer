@@ -284,7 +284,7 @@ class ContractSelectionSearch:
             if check.simulation.total_reward_units != proposal.objective_units:
                 raise RuntimeError("master objective disagrees with the verified route")
             previous_reward = self.incumbent.simulation.total_reward_units if self.incumbent else -1
-            candidate = VerifiedRoute(check.selected_contract_ids, check.simulation)
+            candidate = VerifiedRoute(check.selected_contract_ids, check.simulation, self.problem)
             if self.incumbent is None or candidate.quality > self.incumbent.quality:
                 self.incumbent = candidate
             if self.reward_proven:
@@ -318,12 +318,7 @@ class ContractSelectionSearch:
 
     def _hint_master(self, master: system_tour.SystemTourModel) -> None:
         if self.incumbent is not None:
-            simulation = self.incumbent.simulation
-            master.hint(
-                self.incumbent.selected_contract_ids,
-                tuple(leg.to_system_id for leg in simulation.travel_legs),
-                simulation.total_reward_units,
-            )
+            master.install_incumbent(self.incumbent)
 
     def _record_master(self, result: system_tour.SystemRewardBound) -> None:
         self.master_wall_time += result.wall_time_seconds

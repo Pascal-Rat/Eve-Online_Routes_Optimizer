@@ -19,8 +19,8 @@ from eve_courier_optimizer.optimization.models.system_tour import SystemTourMode
 from eve_courier_optimizer.optimization.search.haul_batches import solve_batches
 from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.universe import UniverseGraph
-from tests.conftest import make_contract, make_snapshot
-from tests.optimization.test_reward_bounds import constraints
+from tests.support.scenarios import make_contract, make_snapshot
+from tests.support.scenarios import reward_constraints as constraints
 
 
 @pytest.fixture

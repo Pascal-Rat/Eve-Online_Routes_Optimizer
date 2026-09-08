@@ -16,7 +16,7 @@ from eve_courier_optimizer.domain import (
     planned_visits,
 )
 from eve_courier_optimizer.eve import contract_scan
-from eve_courier_optimizer.eve.esi import EsiClient
+from eve_courier_optimizer.eve.esi import EsiClient, utc_now
 from eve_courier_optimizer.eve.zkill import (
     DEFAULT_GATE_RADIUS_M,
     DEFAULT_THREAT_WINDOW_SECONDS,
@@ -44,11 +44,13 @@ class CourierPlanner:
         zkill: ZkillClient | None = None,
         *,
         progress: Callable[[str], None] | None = None,
+        clock: Callable[[], datetime] = utc_now,
     ) -> None:
         self.graph = graph
         self.esi = esi
         self.zkill = zkill
         self.progress = progress
+        self.clock = clock
 
     def scan(
         self,
@@ -76,6 +78,7 @@ class CourierPlanner:
             threat_region_ids=threat_region_ids,
             contract_workers=contract_workers,
             progress=self.progress,
+            clock=self.clock,
         )
 
     def solve(
@@ -119,6 +122,7 @@ class CourierPlanner:
     ) -> RoutePlan:
         """Solve again from live execution state while preserving accepted commitments."""
 
+        self._require_trip_systems(state)
         replanning_constraints = state.replanning_constraints(snapshot, at=at)
         return self.solve(
             snapshot,
@@ -132,6 +136,7 @@ class CourierPlanner:
     def refresh_for_trip(
         self, snapshot: ContractSnapshot, trip: CourierTrip, *, at: datetime
     ) -> ContractSnapshot:
+        self._require_trip_systems(trip)
         threat_enabled = bool(trip.security.threat_categories)
         remaining_seconds = max(
             0, int((trip.session_deadline - max(at, trip.current_time)).total_seconds())
@@ -159,6 +164,19 @@ class CourierPlanner:
             ),
             threat_region_ids=threat_regions,
         )
+
+    def _require_trip_systems(self, trip: CourierTrip) -> None:
+        required = {trip.current_system_id, *trip.remaining_required_system_ids}
+        if trip.terminal_system_id is not None:
+            required.add(trip.terminal_system_id)
+        for shipment in trip.active_shipments:
+            required.add(shipment.contract.destination_system_id)
+            if not shipment.picked:
+                required.add(shipment.contract.origin_system_id)
+        missing = required.difference(self.graph.systems)
+        if missing:
+            names = ", ".join(str(system) for system in sorted(missing))
+            raise ValueError(f"the current SDE is missing required trip systems: {names}")
 
     def arm(
         self,

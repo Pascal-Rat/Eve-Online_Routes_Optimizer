@@ -4,7 +4,7 @@ from eve_courier_optimizer.domain import PlanningConstraints, TravelTimeModel
 from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.universe import UniverseGraph
 from eve_courier_optimizer.verification.exhaustive_optimum import solve_exhaustively
-from tests.conftest import make_snapshot
+from tests.support.scenarios import make_snapshot
 
 
 def test_zero_reward_and_infeasible_finish_are_distinct(

@@ -1,12 +1,31 @@
 from __future__ import annotations
 
+import shutil
 from datetime import datetime
+from importlib.resources import files
 from pathlib import Path
 
 import pytest
 
 from eve_courier_optimizer.domain import SecurityBand, SecurityPolicy, ThreatCategory
 from eve_courier_optimizer.routing.universe import UniverseGraph, load_bundled_graph
+
+
+@pytest.mark.parametrize("name", ["space here", "has#hash", "has?query", "has%20escape", "étoiles"])
+def test_sqlite_filename_is_a_literal_path(tmp_path: Path, name: str) -> None:
+    # Use the actual bundled resource name, which is part of the package contract.
+    from eve_courier_optimizer.routing.universe import DEFAULT_SDE_RESOURCE
+
+    source = files("eve_courier_optimizer").joinpath(DEFAULT_SDE_RESOURCE)
+    directory = tmp_path / name
+    directory.mkdir()
+    target = directory / "universe.sqlite3"
+    with source.open("rb") as incoming, target.open("wb") as outgoing:
+        shutil.copyfileobj(incoming, outgoing)
+    before = target.read_bytes()
+    graph = UniverseGraph.from_sqlite(target)
+    assert graph.systems[30_000_142].name == "Jita"
+    assert target.read_bytes() == before
 
 
 def test_shortest_paths_respect_security_policy(tiny_graph: UniverseGraph) -> None:

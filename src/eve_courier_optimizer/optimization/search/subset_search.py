@@ -10,9 +10,26 @@ import heapq
 import math
 import time
 from dataclasses import dataclass
+from typing import NamedTuple
 
 from eve_courier_optimizer.domain import ActionKind, CollateralMode, PlannedAction
 from eve_courier_optimizer.routing.route_problem import RouteProblem
+
+
+class _Label(NamedTuple):
+    """Compact immutable predecessor record; action codes below count are pickups."""
+
+    system: int
+    picked: int
+    delivered: int
+    parent: int
+    action: int
+
+    def visit(self, problem: RouteProblem) -> PlannedAction:
+        count = len(problem.contracts)
+        index = self.action % count
+        kind = ActionKind.PICKUP if self.action < count else ActionKind.DELIVERY
+        return PlannedAction(kind, problem.contracts[index].contract_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,8 +113,7 @@ def solve_subset(
     volume_sum = [0] * (all_mask + 1)
     collateral_sum = [0] * (all_mask + 1)
     reward_sum = [0] * (all_mask + 1)
-    # Label fields: current system index, picked mask, delivered mask, parent label, action.
-    labels = [(start_system, 0, 0, -1, -1)]
+    labels = [_Label(start_system, 0, 0, -1, -1)]
     queue = [(0, 0)]
     earliest = {start_system: 0}
     best_label = 0 if finish_cost[start_system] <= horizon else None
@@ -110,16 +126,10 @@ def solve_subset(
         actions: list[PlannedAction] = []
         label = best_label
         while label is not None and label != 0:
-            _, _, _, parent, action = labels[label]
-            index = action % count
-            actions.append(
-                PlannedAction(
-                    ActionKind.PICKUP if action < count else ActionKind.DELIVERY,
-                    items[index].contract_id,
-                )
-            )
-            label = parent
-        chosen = 0 if best_label is None else labels[best_label][2]
+            predecessor = labels[label]
+            actions.append(predecessor.visit(problem))
+            label = predecessor.parent
+        chosen = 0 if best_label is None else labels[best_label].delivered
         core = 0
         if complete and best_reward is not None and best_reward < reward_sum[all_mask]:
             # A completed search enumerated every feasible completion mask. Downward closure
@@ -156,7 +166,8 @@ def solve_subset(
             return result()
         popped += 1
         elapsed, label_id = heapq.heappop(queue)
-        current, picked, delivered, _, _ = labels[label_id]
+        label = labels[label_id]
+        current, picked, delivered = label.system, label.picked, label.delivered
         key = ((picked << count) | delivered) * len(systems) + current
         if earliest[key] != elapsed:
             continue
@@ -215,7 +226,7 @@ def solve_subset(
                 earliest[next_key] = completion
                 next_label = len(labels)
                 labels.append(
-                    (
+                    _Label(
                         destination,
                         next_picked,
                         next_delivered,

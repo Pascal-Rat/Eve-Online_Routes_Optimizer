@@ -27,9 +27,9 @@ from eve_courier_optimizer.optimization.models.system_tour import SystemTourMode
 from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.universe import Region, SdeMetadata, SolarSystem, UniverseGraph
 from eve_courier_optimizer.verification.exhaustive_optimum import solve_exhaustively
-from eve_courier_optimizer.verification.route_replay import simulate_and_verify
-from tests.conftest import make_contract, make_snapshot
-from tests.optimization.test_reward_bounds import constraints
+from eve_courier_optimizer.verification.route_replay import VerifiedRoute, simulate_and_verify
+from tests.support.scenarios import make_contract, make_snapshot
+from tests.support.scenarios import reward_constraints as constraints
 
 
 def test_integer_crossings_rule_out_a_fractional_return_trip(
@@ -129,10 +129,8 @@ def test_crossing_bounds_preserve_every_enumerated_feasible_selection(
                     if not replay.report.valid:
                         continue
                     master = SystemTourModel(problem)
-                    master.hint(
-                        selected,
-                        tuple(leg.to_system_id for leg in replay.travel_legs),
-                        replay.total_reward_units,
+                    master.install_incumbent(
+                        VerifiedRoute.verify(problem, tiny_graph, visits, selected)
                     )
                     solver = cp_model.CpSolver()
                     solver.parameters.fix_variables_to_their_hinted_value = True

@@ -18,7 +18,7 @@ from eve_courier_optimizer.domain import (
 )
 from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.universe import Region, UniverseGraph
-from tests.conftest import make_contract, make_snapshot
+from tests.support.scenarios import make_contract, make_snapshot
 
 
 def constraints(now: datetime, **overrides: object) -> PlanningConstraints:

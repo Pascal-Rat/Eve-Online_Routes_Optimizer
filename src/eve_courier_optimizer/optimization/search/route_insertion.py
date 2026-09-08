@@ -477,7 +477,7 @@ def construct_incumbent(
             }
         )
     )
-    return VerifiedRoute(ids, simulation)
+    return VerifiedRoute(ids, simulation, problem)
 
 
 def diversify_incumbent(
@@ -525,7 +525,7 @@ def diversify_incumbent(
                         }
                     )
                 )
-                best = VerifiedRoute(ids, candidate)
+                best = VerifiedRoute(ids, candidate, problem)
 
     tried_lanes: set[tuple[int, int]] = set()
     for score in orders[1]:

@@ -19,7 +19,7 @@ from eve_courier_optimizer.optimization import RouteOptimizer, SolverConfig
 from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.security import observed_security_policy
 from eve_courier_optimizer.routing.universe import Region, SdeMetadata, SolarSystem, UniverseGraph
-from tests.conftest import make_contract, make_snapshot
+from tests.support.scenarios import make_contract, make_snapshot
 
 
 @pytest.mark.parametrize(

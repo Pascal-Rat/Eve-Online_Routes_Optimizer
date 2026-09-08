@@ -33,9 +33,9 @@ from eve_courier_optimizer.optimization.search.route_insertion import (
 from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.universe import UniverseGraph
 from eve_courier_optimizer.verification.exhaustive_optimum import solve_exhaustively
-from eve_courier_optimizer.verification.route_replay import simulate_and_verify
-from tests.conftest import make_contract, make_snapshot
-from tests.optimization.test_reward_bounds import constraints
+from eve_courier_optimizer.verification.route_replay import VerifiedRoute, simulate_and_verify
+from tests.support.scenarios import make_contract, make_snapshot
+from tests.support.scenarios import reward_constraints as constraints
 
 
 def test_transport_bounds_preserve_random_exact_optima(
@@ -219,13 +219,10 @@ def test_complete_hints_are_feasible_with_waypoints_and_resources(
     simulation = simulate_and_verify(problem, tiny_graph, visits, ids)
     assert simulation.report.valid
     route = PickupDeliveryModel(problem, selection_hint=build_greedy_route_hint(problem))
-    route.hint(visits, ids)
+    incumbent = VerifiedRoute.verify(problem, tiny_graph, visits, ids)
+    route.install_incumbent(incumbent)
     master = SystemTourModel(problem)
-    master.hint(
-        ids,
-        tuple(leg.to_system_id for leg in simulation.travel_legs),
-        simulation.total_reward_units,
-    )
+    master.install_incumbent(incumbent)
     for model in (route.model, master.model):
         assert len(model.proto.solution_hint.vars) == len(cast(Sized, model.proto.variables))  # pyright: ignore[reportUnknownMemberType]
         solver = cp_model.CpSolver()
