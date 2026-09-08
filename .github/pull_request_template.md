@@ -1,17 +1,19 @@
 ## What changed
 
-Describe the operator-visible or developer-visible change.
+Describe the problem, who it affects, and the resulting behavior. Include a before/after example
+when it helps a reviewer understand the change.
 
 ## Proof and safety impact
 
-- [ ] No mathematical feasible-set, objective, bound, or proof-scope behavior changed.
-- [ ] If proof-sensitive behavior changed, the mathematical justification and regression tests are included.
+State whether the change affects which routes are allowed, how reward is calculated, reward bounds,
+or what an optimality proof covers. If it does, link the mathematical justification and regression
+tests. For documentation-only changes, say so.
+
 - [ ] Runtime artifacts, credentials, tokens, and private route data are not included.
 
 ## Validation
 
-- [ ] Ruff passes.
-- [ ] Strict Mypy passes.
-- [ ] Pytest and the coverage floor pass.
-- [ ] Frozen proof regression passes.
-- [ ] Relevant documentation was updated.
+List the checks actually run and their results. Use [the contributing guide](https://github.com/Pascal-Rat/Eve-Online_Routes_Optimizer/blob/main/CONTRIBUTING.md#validate-your-change)
+to choose relevant checks: formatting, typing, unit tests, browser tests, proof regressions and
+packaging. Explain any relevant check that could not run. For documentation changes, check links,
+rendering and example commands.

@@ -1,7 +1,8 @@
 # Third-party notices
 
-This project uses EVE Online public ESI data and contains a distilled subset of the EVE Online Static
-Data Export (SDE). Use of CCP tools and game data is subject to the
+This project uses data from EVE Online's public EVE Swagger Interface (ESI) and contains a subset
+of the EVE Online Static Data Export (SDE) for systems, stations and routing. Use of CCP tools and
+game data is subject to the
 [CCP Developer License Agreement](https://developers.eveonline.com/license-agreement).
 
 Required CCP proprietary notice:
@@ -13,7 +14,7 @@ This project is an independent third-party tool and does not represent itself as
 CCP.
 
 Optional gate-threat snapshots use public killmail data returned by the
-[zKillboard API](https://github.com/zKillboard/zKillboard/wiki/API-(Killmails)). zKillboard is a
+[zKillboard API](https://zkillboard.com/api/docs/). zKillboard is a
 third-party service, is not bundled with this project, and remains subject to its own terms and data
 availability. The project name and threat classifications do not imply endorsement by zKillboard.
 

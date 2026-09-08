@@ -1,11 +1,30 @@
 # Optimization and proof
 
+This is the technical reference for contributors reviewing the solver's correctness. For a
+worked example without the mathematical terminology, start with
+[how the solver finds and proves a route](HOW_THE_SOLVER_WORKS.md). The
+[domain rules](DOMAIN.md) define the game behavior being modeled.
+
 The objective is maximum gross courier reward over the declared snapshot and route policy.
 A feasible route supplies a lower bound. A sound relaxation or completed exact search supplies
 an upper bound. Equality proves the reward optimum; a timeout alone proves nothing.
 
-For a worked example without the mathematical terminology, start with
-[how the solver finds and proves a route](HOW_THE_SOLVER_WORKS.md).
+## Reading the models
+
+| Term | Role in this implementation |
+| --- | --- |
+| Event | A pickup, delivery, required visit, start or finish. |
+| Incumbent | The best route found so far that passed independent verification. Its reward is a lower bound on the maximum. |
+| Relaxation / system master | An easier problem that omits some constraints. Its proven optimum or valid solver bound can bound reward from above. |
+| Oracle | An exact search used to check whether a proposed contract selection can form a valid route. |
+| Cut | An additional constraint justified by a necessary condition or a proven conflict; it must not exclude a feasible route. |
+| Hint | A suggested assignment to guide search, with no proof value by itself. |
+| Certificate | The recorded status, reward, bound and scope of the result; it is not a standalone proof transcript. |
+
+Read the [complete event model](#complete-event-model) for what is enforced,
+[proof-preserving search](#proof-preserving-search) for how the solver is driven,
+[necessary inequalities](#necessary-inequalities) for how bounds are tightened, and
+[proof interpretation and budgets](#proof-interpretation-and-budgets) for what a result establishes.
 
 ## Complete event model
 

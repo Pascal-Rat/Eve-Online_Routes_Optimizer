@@ -1,12 +1,18 @@
 # How the solver finds and proves a route
 
+You do not need optimization experience to read this guide. It starts with three parcels and a
+small cargo hold, then follows the same ideas into the real search. For EVE-specific terms such as
+collateral and snapshots, see the [short glossary](DOMAIN.md#terms-used-in-the-planner).
+
 The planner answers two questions together: **which contracts should I take, and in what order
 should I pick them up and deliver them?** It aims for the greatest total courier reward within
 your time, cargo, collateral and route restrictions. Reward means the contract payout before
 expenses; it is not net profit or ISK per hour.
 
 Finding a good route and proving it optimal are different jobs. A route shows what you can earn.
-A proof establishes that no allowed route can earn more.
+A proof establishes that no allowed route can earn more within the recorded problem. The planner
+therefore works on two things: finding a route you can use, and reducing the maximum reward that
+any better route could still achieve.
 
 ## A small example you can check yourself
 
@@ -14,11 +20,11 @@ Imagine three contracts from the same pickup station to the same delivery statio
 
 | Contract | Cargo | Reward |
 | --- | --- | --- |
-| A | 6 m3 | 9M ISK |
-| B | 5 m3 | 8M ISK |
-| C | 5 m3 | 8M ISK |
+| A | 6 m³ | 9M ISK |
+| B | 5 m³ | 8M ISK |
+| C | 5 m³ | 8M ISK |
 
-Your hold fits 10 m3. You start at the pickup and must finish at the delivery. Travel takes ten
+Your hold fits 10 m³. You start at the pickup and must finish at the delivery. Travel takes ten
 minutes, and you have exactly ten minutes available. Assume zero pickup/delivery service time,
 enough collateral, no binding deadlines and no parcel-count restriction. There is time for one
 outward trip, so everything you take must fit together.
@@ -40,10 +46,23 @@ Every selection belongs to one group. Neither group can beat 16M, and we have a 
 16M. That is a proof without listing every pickup and delivery order. This is an illustrative
 problem, not a transcript of the solver's search.
 
+## The search at a glance
+
+| Step | What it contributes |
+| --- | --- |
+| Prepare the allowed map and contracts | Defines the problem using your route policy and limits. |
+| Build and check candidate routes | Establishes reward that is actually achievable under the model. |
+| Solve an easier, optimistic problem | Establishes a reward ceiling and suggests combinations worth checking. |
+| Search the complete pickup/delivery problem when needed | Improves the route or closes the remaining proof gap. |
+
+The search may stop when reward is proved best or when its time allowance runs out. A checked
+route can still be useful before the proof is finished.
+
 ## Finding the first useful route
 
-The planner first builds the permitted stargate graph and computes shortest allowed paths between
-relevant systems. Security rules and excluded systems apply to transit as well as endpoints.
+The planner first builds the permitted stargate graph: systems are points, and gates connect them.
+It computes shortest allowed paths between relevant systems. Security rules and excluded systems
+apply to transit as well as endpoints.
 Contracts that violate policy or provably cannot fit even on their own can be removed safely.
 Accepted jobs remain obligations when replanning.
 
@@ -69,7 +88,7 @@ therefore overestimate what we can earn, but cannot exclude a better real route.
 
 This optimism never permits splitting a parcel in a returned route. For example, three 40 m³
 parcels in a 100 m³ hold need two outbound trips. A simple volume estimate can undercount that
-travel, making the reward ceiling too generous. The selection model now also counts whole
+travel, making the reward ceiling too generous. The selection model also counts whole
 crossings and necessary returns to tighten that estimate. The exact route search and independent
 checker always handle each parcel as one indivisible pickup and delivery.
 

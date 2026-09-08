@@ -1,5 +1,19 @@
 # Reproducible benchmarks
 
+The benchmarks let you check the planner's results yourself and compare changes on the same
+inputs. They test route validity, reward and proof status as well as speed. A *frozen* problem uses
+saved data that does not change with the live market.
+
+The fixed one-hour Jita scenarios have known best rewards of **58M ISK** for the deep space
+transport (**DST**) profile and **25.651527M ISK** for the blockade runner (**BR**) profile.
+These are two hauling-ship profiles with different limits, not predictions of what a live trip
+will earn. The runners require both the reward and its proof to match.
+
+For the meaning of reward, bounds and proof status, read the
+[worked solver explanation](HOW_THE_SOLVER_WORKS.md#when-the-proof-is-finished). For a quick
+regression check, run `run_frozen` and `run_empire` below. The later sections explain broader
+performance comparisons.
+
 ## Workloads and hard checks
 
 | Runner | Frozen problem | Required result |
@@ -13,15 +27,23 @@ Updating the application's bundled SDE must not change benchmark fingerprints. S
 seeds control both contract generation and solver search; Empire inputs are fixed independently of
 the seed. Known optima are enforced by the runners and tests.
 
+Run these commands from the repository root after the
+[development setup](../CONTRIBUTING.md#set-up-a-development-environment). They use bundled inputs
+and do not scan the live market. On Windows, replace `.venv/bin/python` with
+`.\.venv\Scripts\python.exe` and put multiline commands on one line.
+
 ```bash
-python -m benchmarks.run_frozen --time-limit 10
-python -m benchmarks.run_empire --time-limit 60 --workers 4
-python -m benchmarks.run_stress --time-limit 10 --seed 17 --workers 4 --output benchmarks/results/stress-10.jsonl
-python -m benchmarks.run_stress --time-limit 30 --seed 71 --workers 4 --output benchmarks/results/stress-30.jsonl
-python -m benchmarks.measure_pipeline --repeat 3 --output benchmarks/results/pipeline.jsonl
+.venv/bin/python -m benchmarks.run_frozen --time-limit 10
+.venv/bin/python -m benchmarks.run_empire --time-limit 60 --workers 4
+.venv/bin/python -m benchmarks.run_stress --time-limit 10 --seed 17 --workers 4 \
+  --output benchmarks/results/stress-10.jsonl
+.venv/bin/python -m benchmarks.run_stress --time-limit 30 --seed 71 --workers 4 \
+  --output benchmarks/results/stress-30.jsonl
+.venv/bin/python -m benchmarks.measure_pipeline --repeat 3 --output benchmarks/results/pipeline.jsonl
 ```
 
-Gold runners exit unsuccessfully on a quality, proof, scope or feasibility regression. Stress output
+The two runners with known optima (`run_frozen` and `run_empire`, called the gold runners) exit
+unsuccessfully on a quality, proof, scope or feasibility regression. Stress output
 includes complete solver settings, source/runner hashes, dependency versions, problem fingerprint,
 reward, bound, proof status, selected IDs, route finish and phase search times. Pipeline measurements
 isolate preparation, construction, selection cuts, system-master building and complete-event building
@@ -51,7 +73,7 @@ when that detour exceeds the horizon. The unrestricted control selects the valua
 reusing its graph also checks that cached unrestricted distances cannot bypass the new policy.
 
 ```bash
-python -m pytest tests/optimization/test_threat_routing.py --no-cov
+.venv/bin/python -m pytest tests/optimization/test_threat_routing.py --no-cov
 ```
 
 An on/off comparison on 2026-09-08 used the **frozen 2026-08-06 observation**, the same profile
@@ -79,7 +101,9 @@ order across repeated trials; do not run tests or competing solvers at the same 
 trial in the comparison, including unsuccessful or unfavorable runs. Compare the same cases, seeds,
 workers and budgets, then verify mathematical input fingerprints before interpreting performance.
 
-To measure a baseline, replace `BASELINE_REF` below with the tag or commit being compared:
+To measure a baseline in a Unix shell, replace `BASELINE_REF` below with the tag or commit being
+compared. Run the baseline from its own directory so its source and fixtures are used, rather than
+this checkout's editable installation.
 
 ```bash
 mkdir -p /tmp/eve-router-baseline
@@ -91,7 +115,7 @@ environment's absolute Python path and `PYTHONPATH=src`. Run them from this chec
 arguments, repeating both revisions. Summarize the observations with:
 
 ```bash
-python -m benchmarks.compare_results \
+.venv/bin/python -m benchmarks.compare_results \
   --baseline /tmp/eve-router-baseline/benchmarks/results/stress-10.jsonl \
              /tmp/eve-router-baseline/benchmarks/results/stress-30.jsonl \
   --candidate benchmarks/results/stress-10.jsonl benchmarks/results/stress-30.jsonl
@@ -103,11 +127,10 @@ one average or turn a timing threshold into an optimization theorem.
 
 The time limit is a shared cooperative allowance for optimization, including decomposition,
 construction and secondary refinement; input preparation is outside it. Atomic operations and
-solver cleanup may overrun slightly. Older revisions such as `edf56a2` instead give the full event
-search a separate allowance. When comparing those revisions, subtract the decomposition cap from
-their event allowance and record actual elapsed time; this still gives the baseline additional
-construction/diversification time. Stress runs disable secondary refinement to compare primary
-search. Use total elapsed for operator latency and phase times for diagnosis.
+solver cleanup may overrun slightly. Verify that both revisions use the same budget semantics;
+matching the numeric time-limit argument alone may not be enough. Stress runs disable secondary
+refinement to compare reward search. Use total elapsed time for the user's wait and phase times
+to diagnose where the work happens.
 Multiworker CP-SAT is nondeterministic. Even a single-worker master can cross a wall-time cutoff on a
 busy or slower CPU and change the later proof trajectory. Investigate repeated distributions and
 model/hint equality, while retaining every known optimum as an exact quality requirement.
@@ -128,7 +151,7 @@ are shuffled. These cases complement the frozen observed snapshots and independe
 small correctness tests; none alone establishes performance on every EVE workload.
 
 ```bash
-python -m benchmarks.run_generalization --input-seeds 4101 4102 4103 4104 \
+.venv/bin/python -m benchmarks.run_generalization --input-seeds 4101 4102 4103 4104 \
   --solver-seed 29 --time-limit 12 --decomposition-time 4 \
   --output benchmarks/results/generalization.jsonl
 ```
@@ -138,8 +161,7 @@ results. Use `--development` for existing stress cases while developing a candid
 algorithm, settings and runner before evaluating held-out seeds, retain every result, and compare
 problem fingerprints across revisions. If a candidate is changed in response to those results,
 the inspected cases become development data and need a fresh holdout. The runner records source
-and runner hashes, versions, settings, input/search seeds and proof evidence. For old budget
-semantics use `--legacy-phase-budget` with the same target allowance and document the difference.
+and runner hashes, versions, settings, input/search seeds and proof evidence.
 
 Benchmark identities and known optima belong in fixtures and assertions, never in production
 selection, pruning or solver settings. Structural heuristics still need empirical evaluation:
