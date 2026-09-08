@@ -1,0 +1,278 @@
+{
+  "snapshot": {
+    "fetched_at": "2026-08-05T12:00:00+00:00",
+    "age_seconds": 2946436,
+    "compatibility_date": "2026-08-05",
+    "sde_build_number": 1,
+    "region_ids": [
+      10
+    ],
+    "region_names": [
+      "Test Region"
+    ],
+    "contracts": 1,
+    "system_kills_fetched_at": null,
+    "system_kill_systems": 0,
+    "threat_intel_fetched_at": null,
+    "threat_window_seconds": null,
+    "threat_gate_radius_m": null,
+    "threat_coverage_region_ids": [],
+    "threat_incomplete_region_ids": [],
+    "threat_killmails_seen": 0,
+    "gate_threat_events": 0
+  },
+  "plan": {
+    "schema_version": 3,
+    "summary": {
+      "selected_contract_ids": [
+        9001
+      ],
+      "total_reward_units": 500,
+      "total_reward_isk": "5",
+      "finish_seconds": 22
+    },
+    "certificate": {
+      "status": "proven_optimal",
+      "solver_status": "TRIVIAL_BOUND_MATCHED",
+      "objective_units": 500,
+      "objective_isk": "5",
+      "best_bound_units": 500,
+      "best_bound_isk": "5",
+      "absolute_gap_units": 0,
+      "relative_gap": 0.0,
+      "problem_sha256": "48ba2b125ef049607b49b578186c4a52c6b4d5cd6c587ac7a624f3e923cf1de1",
+      "solver_name": "OR-Tools CP-SAT",
+      "solver_version": "9.15.6755",
+      "wall_time_seconds": 0.002107219,
+      "branches": 0,
+      "conflicts": 0,
+      "scope_untruncated": true,
+      "feasibility_verified": true,
+      "independent_reference_verified": true,
+      "bound_strengthening": {
+        "system_relaxation_status": null,
+        "system_relaxation_bound_units": null,
+        "system_relaxation_bound_isk": null,
+        "system_relaxation_wall_time_seconds": 0.0,
+        "system_relaxation_systems": 0,
+        "incompatibility_pairs": 0,
+        "incompatibility_cliques": 0,
+        "decomposition_status": null,
+        "decomposition_iterations": 0,
+        "decomposition_learned_cuts": 0,
+        "decomposition_subproblem_wall_time_seconds": 0.002107219,
+        "decomposition_proof_closed": false
+      },
+      "claim": "PROVEN OPTIMAL means no feasible route with greater reward exists among all contracts remaining after the declared endpoint/routing policy exclusions and mathematically proof-preserving reductions. Objective is total courier reward under the recorded contract snapshot, SDE stargate graph, declared routing/route-shape policy, integer cargo/collateral/parcel resource model, and deterministic travel-time model."
+    },
+    "scope": {
+      "snapshot_fetched_at": "2026-08-05T12:00:00+00:00",
+      "snapshot_compatibility_date": "2026-08-05",
+      "sde_build_number": 1,
+      "scanned_region_ids": [
+        10
+      ],
+      "public_couriers_seen": 1,
+      "eligible_contracts": 1,
+      "policy_exclusions": {},
+      "safe_reductions": {},
+      "heuristic_reductions": {}
+    },
+    "model": {
+      "start_system_id": 1,
+      "cargo_capacity_m3": "1",
+      "collateral_budget_isk": "2",
+      "horizon_seconds": 360,
+      "snapshot_time": "2026-08-05T12:00:00+00:00",
+      "collateral_mode": "locked",
+      "return_to_start": true,
+      "required_system_ids": [],
+      "finish_system_id": null,
+      "terminal_system_id": 1,
+      "max_simultaneous_contracts": null,
+      "seconds_per_jump": 10,
+      "service_seconds": 1,
+      "minimum_security": null,
+      "avoided_system_ids": [],
+      "allowed_security_bands": [
+        "high"
+      ],
+      "gank_avoided_system_ids": [],
+      "gank_ship_kill_threshold": null,
+      "gank_activity_fetched_at": null,
+      "threat_avoided_system_ids": [],
+      "threat_categories": [],
+      "threat_min_events": null,
+      "threat_intel_fetched_at": null,
+      "threat_window_seconds": null,
+      "threat_gate_radius_m": null,
+      "threat_coverage_region_ids": [],
+      "threat_incomplete_region_ids": [],
+      "start_system_name": "Alpha",
+      "finish_system_name": null,
+      "avoided_systems": [],
+      "required_systems": []
+    },
+    "route": [
+      {
+        "sequence": 1,
+        "action": "pickup",
+        "contract_id": 9001,
+        "system_id": 1,
+        "location_id": 101,
+        "arrival_seconds": 0,
+        "completion_seconds": 1,
+        "cargo_after_units": 10,
+        "cargo_after_m3": "0.01",
+        "collateral_after_units": 100,
+        "collateral_after_isk": "1",
+        "cumulative_reward_units": 0,
+        "cumulative_reward_isk": "0",
+        "jump_path": [
+          1
+        ],
+        "system_name": "Alpha",
+        "jump_count": 0,
+        "jump_path_systems": [
+          {
+            "system_id": 1,
+            "name": "Alpha",
+            "security_status": 1.0,
+            "security_band": "high"
+          }
+        ],
+        "title": "",
+        "reward_isk": "5",
+        "volume_m3": "0.01",
+        "mandatory": false
+      },
+      {
+        "sequence": 2,
+        "action": "delivery",
+        "contract_id": 9001,
+        "system_id": 2,
+        "location_id": 102,
+        "arrival_seconds": 11,
+        "completion_seconds": 12,
+        "cargo_after_units": 0,
+        "cargo_after_m3": "0",
+        "collateral_after_units": 0,
+        "collateral_after_isk": "0",
+        "cumulative_reward_units": 500,
+        "cumulative_reward_isk": "5",
+        "jump_path": [
+          1,
+          2
+        ],
+        "system_name": "Beta",
+        "jump_count": 1,
+        "jump_path_systems": [
+          {
+            "system_id": 1,
+            "name": "Alpha",
+            "security_status": 1.0,
+            "security_band": "high"
+          },
+          {
+            "system_id": 2,
+            "name": "Beta",
+            "security_status": 0.9,
+            "security_band": "high"
+          }
+        ],
+        "title": "",
+        "reward_isk": "5",
+        "volume_m3": "0.01",
+        "mandatory": false
+      }
+    ],
+    "travel_legs": [
+      {
+        "sequence": 1,
+        "kind": "pickup",
+        "from_system_id": 1,
+        "to_system_id": 1,
+        "arrival_seconds": 0,
+        "completion_seconds": 1,
+        "contract_id": 9001,
+        "jump_path": [
+          1
+        ],
+        "from_system_name": "Alpha",
+        "to_system_name": "Alpha",
+        "jump_count": 0,
+        "jump_path_systems": [
+          {
+            "system_id": 1,
+            "name": "Alpha",
+            "security_status": 1.0,
+            "security_band": "high"
+          }
+        ]
+      },
+      {
+        "sequence": 2,
+        "kind": "delivery",
+        "from_system_id": 1,
+        "to_system_id": 2,
+        "arrival_seconds": 11,
+        "completion_seconds": 12,
+        "contract_id": 9001,
+        "jump_path": [
+          1,
+          2
+        ],
+        "from_system_name": "Alpha",
+        "to_system_name": "Beta",
+        "jump_count": 1,
+        "jump_path_systems": [
+          {
+            "system_id": 1,
+            "name": "Alpha",
+            "security_status": 1.0,
+            "security_band": "high"
+          },
+          {
+            "system_id": 2,
+            "name": "Beta",
+            "security_status": 0.9,
+            "security_band": "high"
+          }
+        ]
+      },
+      {
+        "sequence": 3,
+        "kind": "finish",
+        "from_system_id": 2,
+        "to_system_id": 1,
+        "arrival_seconds": 22,
+        "completion_seconds": 22,
+        "contract_id": null,
+        "jump_path": [
+          2,
+          1
+        ],
+        "from_system_name": "Beta",
+        "to_system_name": "Alpha",
+        "jump_count": 1,
+        "jump_path_systems": [
+          {
+            "system_id": 2,
+            "name": "Beta",
+            "security_status": 0.9,
+            "security_band": "high"
+          },
+          {
+            "system_id": 1,
+            "name": "Alpha",
+            "security_status": 1.0,
+            "security_band": "high"
+          }
+        ]
+      }
+    ]
+  },
+  "execution": null,
+  "revision": 2,
+  "proposal_id": "fixture-proposal"
+}

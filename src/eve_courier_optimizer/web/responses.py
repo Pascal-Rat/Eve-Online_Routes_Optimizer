@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import cast
 
 from eve_courier_optimizer.application.courier_trip import CourierTrip
+from eve_courier_optimizer.application.plan_contract import (
+    PathSystem,
+    PlanPayload,
+    RouteStepPayload,
+    TravelLegPayload,
+    validate_contract,
+)
 from eve_courier_optimizer.application.trip_file import trip_to_dict
 from eve_courier_optimizer.domain import (
     ContractSnapshot,
@@ -17,11 +24,18 @@ from eve_courier_optimizer.domain import (
 )
 from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.universe import UniverseGraph
+from eve_courier_optimizer.web.contracts import (
+    ExecutionPayload,
+    RankingPayload,
+    RankItem,
+    RankScope,
+    SnapshotSummary,
+)
 
-JsonObject = dict[str, Any]
 
-
-def snapshot_summary(snapshot: ContractSnapshot | None, graph: UniverseGraph) -> JsonObject | None:
+def snapshot_summary(
+    snapshot: ContractSnapshot | None, graph: UniverseGraph
+) -> SnapshotSummary | None:
     if snapshot is None:
         return None
     age_seconds = max(
@@ -62,7 +76,7 @@ def snapshot_summary(snapshot: ContractSnapshot | None, graph: UniverseGraph) ->
 
 def trip_response(
     execution: CourierTrip | None, graph: UniverseGraph, at: datetime
-) -> JsonObject | None:
+) -> ExecutionPayload | None:
     if execution is None:
         return None
     payload = trip_to_dict(execution)
@@ -103,10 +117,11 @@ def trip_response(
             "horizon_expired": at > execution.session_deadline,
         }
     )
-    return payload
+    validate_contract(payload, ExecutionPayload, "execution")
+    return cast(ExecutionPayload, payload)
 
 
-def scope_payload(problem: RouteProblem) -> JsonObject:
+def scope_payload(problem: RouteProblem) -> RankScope:
     scope = problem.scope
     return {
         "public_couriers_seen": scope.public_couriers_seen,
@@ -119,39 +134,27 @@ def scope_payload(problem: RouteProblem) -> JsonObject:
 
 
 def decorate_plan(
-    payload: JsonObject,
+    payload: PlanPayload,
     graph: UniverseGraph,
     snapshot: ContractSnapshot | None,
     execution: CourierTrip | None,
-) -> JsonObject:
-    model = payload.get("model")
-    if isinstance(model, dict):
-        saved_model = cast(JsonObject, model)
-        start_id = int(saved_model.get("start_system_id", 0))
-        start = graph.systems.get(start_id)
-        saved_model["start_system_name"] = start.name if start is not None else None
-        finish_id = saved_model.get("finish_system_id")
-        finish = graph.systems.get(int(finish_id)) if finish_id is not None else None
-        saved_model["finish_system_name"] = finish.name if finish is not None else None
-        for ids_key, systems_key in (
-            ("avoided_system_ids", "avoided_systems"),
-            ("required_system_ids", "required_systems"),
-        ):
-            raw_ids = saved_model.get(ids_key)
-            if not isinstance(raw_ids, list):
-                continue
-            saved_model[systems_key] = [
-                {
-                    "id": system_id,
-                    "name": graph.systems[system_id].name,
-                }
-                for raw_id in cast(list[int | str], raw_ids)
-                if (system_id := int(raw_id)) in graph.systems
-            ]
-
-    route = payload.get("route")
-    if not isinstance(route, list):
-        return payload
+) -> PlanPayload:
+    model = payload["model"]
+    start = graph.systems.get(model["start_system_id"])
+    finish_id = model["finish_system_id"]
+    finish = graph.systems.get(finish_id) if finish_id is not None else None
+    model["start_system_name"] = start.name if start is not None else None
+    model["finish_system_name"] = finish.name if finish is not None else None
+    model["avoided_systems"] = [
+        {"id": system_id, "name": graph.systems[system_id].name}
+        for system_id in model["avoided_system_ids"]
+        if system_id in graph.systems
+    ]
+    model["required_systems"] = [
+        {"id": system_id, "name": graph.systems[system_id].name}
+        for system_id in model["required_system_ids"]
+        if system_id in graph.systems
+    ]
     public = (
         {contract.contract_id: contract for contract in snapshot.contracts}
         if snapshot is not None
@@ -165,68 +168,46 @@ def decorate_plan(
         if execution is not None
         else {}
     )
-    for raw_step in cast(list[object], route):
-        if not isinstance(raw_step, dict):
-            continue
-        step = cast(JsonObject, raw_step)
-        contract_id = int(step.get("contract_id", 0))
+    for step in payload["route"]:
+        contract_id = step["contract_id"]
         contract = public.get(contract_id) or active.get(contract_id)
         _decorate_route_step(graph, step, contract, mandatory=contract_id in active)
-    _decorate_travel_legs(payload, graph)
+    for leg in payload["travel_legs"]:
+        source = graph.systems.get(leg["from_system_id"])
+        destination = graph.systems.get(leg["to_system_id"])
+        leg["from_system_name"] = source.name if source is not None else None
+        leg["to_system_name"] = destination.name if destination is not None else None
+        _decorate_jump_path(leg, graph)
     return payload
 
 
-def _decorate_jump_path(payload: JsonObject, graph: UniverseGraph) -> None:
-    raw_path = payload.get("jump_path")
-    if not isinstance(raw_path, list):
-        return
-    payload["jump_count"] = max(0, len(cast(list[object], raw_path)) - 1)
-    path_systems: list[JsonObject] = []
-    for raw_system_id in cast(list[int | str], raw_path):
-        system_id = int(raw_system_id)
-        path_system = graph.systems.get(system_id)
-        path_systems.append(
+def _decorate_jump_path(payload: RouteStepPayload | TravelLegPayload, graph: UniverseGraph) -> None:
+    path = payload["jump_path"]
+    payload["jump_count"] = max(0, len(path) - 1)
+    systems: list[PathSystem] = []
+    for system_id in path:
+        system = graph.systems.get(system_id)
+        systems.append(
             {
                 "system_id": system_id,
-                "name": path_system.name if path_system is not None else str(system_id),
-                "security_status": (
-                    path_system.security_status if path_system is not None else None
-                ),
-                "security_band": (
-                    security_band(path_system.security_status).value
-                    if path_system is not None
-                    else None
-                ),
+                "name": system.name if system is not None else str(system_id),
+                "security_status": system.security_status if system is not None else None,
+                "security_band": security_band(system.security_status).value
+                if system is not None
+                else None,
             }
         )
-    payload["jump_path_systems"] = path_systems
-
-
-def _decorate_travel_legs(payload: JsonObject, graph: UniverseGraph) -> None:
-    raw_legs = payload.get("travel_legs")
-    if not isinstance(raw_legs, list):
-        return
-    for raw_leg in cast(list[object], raw_legs):
-        if not isinstance(raw_leg, dict):
-            continue
-        leg = cast(JsonObject, raw_leg)
-        from_system = graph.systems.get(int(leg.get("from_system_id", 0)))
-        to_system = graph.systems.get(int(leg.get("to_system_id", 0)))
-        leg["from_system_name"] = from_system.name if from_system is not None else None
-        leg["to_system_name"] = to_system.name if to_system is not None else None
-        _decorate_jump_path(leg, graph)
+    payload["jump_path_systems"] = systems
 
 
 def _decorate_route_step(
     graph: UniverseGraph,
-    step: JsonObject,
+    step: RouteStepPayload,
     contract: PublicCourierContract | None,
     *,
     mandatory: bool,
 ) -> None:
-    """Add human-readable pilot guidance without changing canonical plan semantics."""
-
-    system = graph.systems.get(int(step.get("system_id", 0)))
+    system = graph.systems.get(step["system_id"])
     step["system_name"] = system.name if system is not None else None
     _decorate_jump_path(step, graph)
     if contract is not None:
@@ -236,9 +217,9 @@ def _decorate_route_step(
         step["mandatory"] = mandatory
 
 
-def ranked_contracts(problem: RouteProblem, graph: UniverseGraph) -> JsonObject:
+def ranked_contracts(problem: RouteProblem, graph: UniverseGraph) -> RankingPayload:
     scores = problem.rank_contracts()
-    items: list[JsonObject] = []
+    items: list[RankItem] = []
     for score in scores[:50]:
         contract = score.contract
         origin = graph.systems[score.contract.origin_system_id]

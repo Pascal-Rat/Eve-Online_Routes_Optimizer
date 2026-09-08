@@ -1,5 +1,6 @@
 import { $, $$, fmtNumber, fmtISK, fmtDuration, makeCell } from "./display.js";
 
+/** @param {string} selector @param {boolean} passed @param {string} yes @param {string} no */
 function setCheck(selector, passed, yes, no) {
   const node = $(selector);
   node.textContent = `${passed ? "✓" : "△"} ${passed ? yes : no}`;
@@ -7,6 +8,7 @@ function setCheck(selector, passed, yes, no) {
   node.classList.toggle("warn", !passed);
 }
 
+/** @param {import("./contracts").PlanPayload | null} plan */
 export function renderProof(plan) {
   const empty = $("#proof-empty");
   const content = $("#proof-content");
@@ -75,7 +77,9 @@ export function renderProof(plan) {
   $("#proof-claim").textContent = cert.claim || "";
 }
 
+/** @param {import("./contracts").ExecutionPayload | null} execution */
 function executionMap(execution) {
+  /** @type {Map<number, import("./contracts").ActiveShipmentPayload>} */
   const map = new Map();
   for (const shipment of execution?.active_shipments || []) {
     map.set(Number(shipment.contract.contract_id), shipment);
@@ -83,6 +87,7 @@ function executionMap(execution) {
   return map;
 }
 
+/** @param {import("./contracts").PlanPayload | null} plan @param {import("./contracts").ExecutionPayload | null} execution @param {boolean} pendingArm */
 export function renderRoute(plan, execution, pendingArm) {
   const route = plan?.route || [];
   $("#route-empty").classList.toggle("hidden", route.length > 0);
@@ -166,13 +171,14 @@ export function renderRoute(plan, execution, pendingArm) {
   renderPilotRoute(plan, execution);
 }
 
+/** @param {import("./contracts").PlanPayload | null} plan @param {import("./contracts").ExecutionPayload | null} execution */
 function renderPilotRoute(plan, execution) {
   const travelLegs = plan?.travel_legs || [];
   const panel = $("#pilot-route");
   const legs = $("#pilot-legs");
   panel.classList.toggle("hidden", travelLegs.length === 0);
   legs.replaceChildren();
-  if (!travelLegs.length) return;
+  if (!plan || !travelLegs.length) return;
 
   const threatAware = (plan.model?.threat_categories?.length || 0) > 0;
   $("#route-policy-badge").textContent = threatAware ? "Threat-filtered transit" : "Security-filtered transit";
@@ -259,6 +265,7 @@ function renderPilotRoute(plan, execution) {
   }
 }
 
+/** @param {import("./contracts").ExecutionPayload | null} execution */
 export function renderCommitments(execution) {
   const list = $("#commitment-list");
   list.replaceChildren();
@@ -282,7 +289,7 @@ export function renderCommitments(execution) {
   const markers = [...(execution?.remaining_required_systems || [])];
   if (execution?.terminal_system_id && execution.current_system_id !== execution.terminal_system_id
       && !markers.some((item) => item.system_id === execution.terminal_system_id)) {
-    markers.push({ system_id: execution.terminal_system_id, name: execution.terminal_system_name });
+    markers.push({ system_id: execution.terminal_system_id, name: execution.terminal_system_name || String(execution.terminal_system_id) });
   }
   for (const system of markers) {
     const button = document.createElement("button");
@@ -295,6 +302,7 @@ export function renderCommitments(execution) {
   }
 }
 
+/** @param {import("./contracts").RankingPayload | null} payload */
 export function renderRank(payload) {
   const items = payload?.items || [];
   $("#rank-empty").classList.toggle("hidden", items.length > 0);

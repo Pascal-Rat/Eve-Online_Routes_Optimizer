@@ -12,9 +12,14 @@ from eve_courier_optimizer.eve.esi import EsiClient
 from eve_courier_optimizer.routing.universe import UniverseGraph
 from eve_courier_optimizer.web.server import create_http_server
 from eve_courier_optimizer.web.workspace import PlanningWorkspace
-from tests.conftest import tiny_graph as tiny_graph
-from tests.web.test_recovery import MutableClock
-from tests.web.test_server import CourierTransport
+from tests.support.clock import MutableClock
+from tests.support.scenarios import make_tiny_graph
+from tests.support.web import CourierTransport
+
+
+@pytest.fixture
+def tiny_graph() -> UniverseGraph:
+    return make_tiny_graph()
 
 
 @dataclass
@@ -26,7 +31,7 @@ class WebSession:
 
 @pytest.fixture
 def web_session(tiny_graph: UniverseGraph, tmp_path: Path) -> Iterator[WebSession]:
-    clock = MutableClock(datetime.now(UTC))
+    clock = MutableClock(datetime(2026, 8, 5, 12, tzinfo=UTC))
     app = PlanningWorkspace(
         tiny_graph, EsiClient(transport=CourierTransport(clock.value)), tmp_path, clock=clock
     )

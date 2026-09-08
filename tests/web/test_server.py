@@ -4,11 +4,9 @@ import json
 import sys
 import threading
 import webbrowser
-from collections.abc import Mapping
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -16,78 +14,24 @@ import pytest
 
 import eve_courier_optimizer.cli as cli_module
 import eve_courier_optimizer.web.server as webapp_module
+from eve_courier_optimizer.application.file_lock import WorkspaceConflict
 from eve_courier_optimizer.cli import main
 from eve_courier_optimizer.domain import GateEvidence, GateThreatEvent, SolveResult, ThreatCategory
 from eve_courier_optimizer.eve.esi import EsiClient, EsiError
-from eve_courier_optimizer.eve.http import HttpResponse, RequestBudget
+from eve_courier_optimizer.eve.http import RequestBudget
 from eve_courier_optimizer.eve.zkill import ZkillClient
 from eve_courier_optimizer.routing.universe import Region, UniverseGraph
+from eve_courier_optimizer.web.operations import ProposedPlan
 from eve_courier_optimizer.web.server import asset, create_http_server, run_local_web_ui
 from eve_courier_optimizer.web.workspace import PlanningWorkspace, default_workspace_path
-
-
-class CourierTransport:
-    def __init__(self, now: datetime) -> None:
-        self.now = now
-        self.calls = 0
-
-    def get(self, url: str, headers: Mapping[str, str], timeout_seconds: float) -> HttpResponse:
-        del headers, timeout_seconds
-        self.calls += 1
-        if url.endswith("/universe/system_kills/"):
-            activity = [
-                {"system_id": 1, "ship_kills": 12, "pod_kills": 2, "npc_kills": 40},
-                {"system_id": 2, "ship_kills": 3, "pod_kills": 0, "npc_kills": 12},
-                {"system_id": 4, "ship_kills": 15, "pod_kills": 1, "npc_kills": 5},
-            ]
-            return HttpResponse(200, {}, json.dumps(activity).encode())
-        payload = [
-            {
-                "contract_id": 9001,
-                "start_location_id": 101,
-                "end_location_id": 102,
-                "volume": 0.01,
-                "collateral": 1.0,
-                "reward": 5.0,
-                "date_expired": (self.now + timedelta(days=1)).isoformat(),
-                "date_issued": (self.now - timedelta(hours=1)).isoformat(),
-                "days_to_complete": 1,
-                "title": "Alpha to Beta test load",
-                "type": "courier",
-            }
-        ]
-        return HttpResponse(200, {"x-pages": "1"}, json.dumps(payload).encode())
-
-
-def planning_payload() -> dict[str, object]:
-    return {
-        "start": "Alpha",
-        "cargo_m3": "1",
-        "collateral_isk": "2",
-        "hours": "0.1",
-        "security": "highsec",
-        "collateral_mode": "locked",
-        "avoid_systems": [],
-        "seconds_per_jump": "10",
-        "service_seconds": "1",
-        "time_limit": "10",
-        "workers": "1",
-        "max_candidates": None,
-    }
-
-
-def post_json(url: str, payload: object, *, origin: str | None = None) -> dict[str, Any]:
-    headers = {"Content-Type": "application/json"}
-    if origin is not None:
-        headers["Origin"] = origin
-    request = Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers=headers,
-        method="POST",
-    )
-    with urlopen(request, timeout=2) as response:  # noqa: S310 - loopback test server
-        return cast(dict[str, Any], json.load(response))
+from tests.support.assertions import present
+from tests.support.web import (
+    CourierTransport,
+    planning_payload,
+    post_json,
+    proposal_input,
+    seed_snapshot,
+)
 
 
 @pytest.mark.parametrize(
@@ -138,8 +82,8 @@ def test_web_application_full_locked_workflow(
     assert app.system_matches("a") == {"items": []}
 
     scan = app.scan({"regions": ["Test Region"]})
-    assert scan["snapshot"]["contracts"] == 1
-    assert app.snapshot_path.exists()
+    assert present(scan["snapshot"])["contracts"] == 1
+    assert app.artifact("snapshot.json") is not None
     assert transport.calls == 2
 
     ranked = app.rank(planning_payload())
@@ -150,18 +94,23 @@ def test_web_application_full_locked_workflow(
     assert plan["certificate"]["status"] == "proven_optimal"
     assert plan["certificate"]["scope_untruncated"] is True
     assert plan["certificate"]["feasibility_verified"] is True
-    assert plan["route"][0]["system_name"] == "Alpha"
-    assert plan["route"][0]["title"] == "Alpha to Beta test load"
-    assert [system["name"] for system in plan["route"][1]["jump_path_systems"]] == ["Alpha", "Beta"]
-    assert plan["route"][1]["jump_path_systems"][-1]["security_band"] == "high"
-    assert app.plan_path.exists()
+    assert plan["route"][0].get("system_name") == "Alpha"
+    assert plan["route"][0].get("title") == "Alpha to Beta test load"
+    assert [system["name"] for system in plan["route"][1].get("jump_path_systems", [])] == [
+        "Alpha",
+        "Beta",
+    ]
+    assert plan["route"][1].get("jump_path_systems", [])[-1]["security_band"] == "high"
+    assert app.artifact("plan.json") is not None
 
     with pytest.raises(ValueError, match="requires confirmation"):
-        app.start_execution({"confirm_locked_acceptance": False})
-    started = app.start_execution({"confirm_locked_acceptance": True})["execution"]
-    assert started["active_count"] == 1
-    assert started["active_shipments"][0]["picked"] is False
-    assert app.trip_path.exists()
+        app.start_execution(proposal_input(app, {"confirm_locked_acceptance": False}))
+    started = app.start_execution(proposal_input(app, {"confirm_locked_acceptance": True}))[
+        "execution"
+    ]
+    assert present(started)["active_count"] == 1
+    assert present(started)["active_shipments"][0]["picked"] is False
+    assert app.artifact("execution.json") is not None
 
     restored = PlanningWorkspace(
         tiny_graph,
@@ -169,27 +118,30 @@ def test_web_application_full_locked_workflow(
         tmp_path,
     )
     restored_status = restored.status()
-    assert restored_status["snapshot"]["contracts"] == 1
-    assert restored_status["execution"]["active_count"] == 1
-    assert restored_status["execution"]["can_end_safely"] is False
-    assert restored_status["plan"]["model"]["start_system_name"] == "Alpha"
-    assert restored_status["plan"]["route"][0]["title"] == "Alpha to Beta test load"
-    assert restored_status["plan"]["route"][1]["jump_path_systems"][-1]["name"] == "Beta"
+    assert present(restored_status["snapshot"])["contracts"] == 1
+    assert present(restored_status["execution"])["active_count"] == 1
+    assert present(restored_status["execution"])["can_end_safely"] is False
+    assert present(restored_status["plan"])["model"].get("start_system_name") == "Alpha"
+    assert present(restored_status["plan"])["route"][0].get("title") == "Alpha to Beta test load"
+    assert (
+        present(restored_status["plan"])["route"][1].get("jump_path_systems", [])[-1]["name"]
+        == "Beta"
+    )
 
     # Arming is deliberately one-shot: it cannot rewind a live session to an older solved state.
-    with pytest.raises(ValueError, match="solve a route"):
-        app.start_execution({"confirm_locked_acceptance": True})
+    with pytest.raises(WorkspaceConflict, match="no longer current"):
+        app.start_execution(proposal_input(app, {"confirm_locked_acceptance": True}))
 
     picked = app.record_action({"action": "pickup", "contract_id": 9001, "at": "now"})["execution"]
-    assert picked["active_shipments"][0]["picked"] is True
+    assert present(picked)["active_shipments"][0]["picked"] is True
     refreshed_plan = app.replan({**planning_payload(), "refresh": True})["plan"]
     assert refreshed_plan["route"][-1]["action"] == "delivery"
     delivered = app.record_action({"action": "delivery", "contract_id": 9001, "at": "now"})[
         "execution"
     ]
-    assert delivered["active_count"] == 0
-    assert delivered["can_end_safely"] is True
-    assert delivered["completed_contract_ids"] == [9001]
+    assert present(delivered)["active_count"] == 0
+    assert present(delivered)["can_end_safely"] is True
+    assert present(delivered)["completed_contract_ids"] == [9001]
 
     # A stale public observation cannot make an already-delivered contract profitable twice.
     replanned = app.replan({**planning_payload(), "refresh": False})["plan"]
@@ -197,7 +149,7 @@ def test_web_application_full_locked_workflow(
     assert replanned["scope"]["safe_reductions"] == {"completed_in_session": 1}
 
     app.reset_execution()
-    assert not app.trip_path.exists()
+    assert app.artifact("execution.json") is None
 
 
 def test_web_validation_errors_are_explicit(tiny_graph: UniverseGraph, tmp_path: Path) -> None:
@@ -217,7 +169,7 @@ def test_web_validation_errors_are_explicit(tiny_graph: UniverseGraph, tmp_path:
             app.scan({"regions": [region]})
 
     # Numeric SDE IDs are accepted as well as exact names.
-    assert app.scan({"regions": [10]})["snapshot"]["region_ids"] == [10]
+    assert present(app.scan({"regions": [10]})["snapshot"])["region_ids"] == [10]
 
     invalid_updates: list[tuple[str, object, str]] = [
         ("security", "unsafe", "security"),
@@ -265,20 +217,27 @@ def test_web_validation_errors_are_explicit(tiny_graph: UniverseGraph, tmp_path:
     saved_plan = app.plan
     result = app.plan.result
     bad_certificate = replace(result.certificate, feasibility_verified=False)
-    app.plan = replace(
-        saved_plan,
-        result=SolveResult(
-            result.selected_contract_ids,
-            result.route,
-            result.total_reward_units,
-            result.finish_seconds,
-            bad_certificate,
+    snapshot = present(app.snapshot)
+    app.publish(
+        ProposedPlan(
+            snapshot,
+            replace(
+                saved_plan,
+                result=SolveResult(
+                    result.selected_contract_ids,
+                    result.route,
+                    result.total_reward_units,
+                    result.finish_seconds,
+                    bad_certificate,
+                ),
+            ),
         ),
+        expected_revision=app.revision,
     )
     with pytest.raises(ValueError, match="no independently verified"):
-        app.start_execution({"confirm_locked_acceptance": True})
-    app.plan = saved_plan
-    app.start_execution({"confirm_locked_acceptance": True})
+        app.start_execution(proposal_input(app, {"confirm_locked_acceptance": True}))
+    app.publish(ProposedPlan(snapshot, saved_plan), expected_revision=app.revision)
+    app.start_execution(proposal_input(app, {"confirm_locked_acceptance": True}))
     with pytest.raises(ValueError, match="execution session already exists"):
         app.solve(planning_payload())
     with pytest.raises(ValueError, match="contract_id must be an integer"):
@@ -312,18 +271,18 @@ def test_web_route_shape_controls_support_zero_cargo_waypoint_and_fixed_finish(
     assert plan["model"]["terminal_system_id"] == 1
     assert plan["model"]["max_simultaneous_contracts"] == 0
     assert [leg["kind"] for leg in plan["travel_legs"]] == ["waypoint", "finish"]
-    assert plan["travel_legs"][0]["to_system_name"] == "Gamma"
-    assert plan["travel_legs"][-1]["to_system_name"] == "Alpha"
+    assert plan["travel_legs"][0].get("to_system_name") == "Gamma"
+    assert plan["travel_legs"][-1].get("to_system_name") == "Alpha"
 
-    execution = app.start_execution({})["execution"]
-    assert execution["active_count"] == 0
-    assert execution["can_end_safely"] is True
-    assert execution["remaining_required_system_ids"] == [3]
+    execution = app.start_execution(proposal_input(app, {}))["execution"]
+    assert present(execution)["active_count"] == 0
+    assert present(execution)["can_end_safely"] is True
+    assert present(execution)["remaining_required_system_ids"] == [3]
     reached = app.record_action({"action": "route_system", "system_id": 3, "at": "now"})[
         "execution"
     ]
-    assert reached["current_system_name"] == "Gamma"
-    assert reached["remaining_required_system_ids"] == []
+    assert present(reached)["current_system_name"] == "Gamma"
+    assert present(reached)["remaining_required_system_ids"] == []
 
     app.reset_execution()
     fixed_finish = app.solve(
@@ -349,9 +308,9 @@ def test_web_modern_controls_record_security_time_isk_and_gank_policy(
         tmp_path,
     )
     scanned = app.scan({"region_scope": "all"})["snapshot"]
-    assert scanned["region_ids"] == [10]
-    assert scanned["system_kill_systems"] == 3
-    assert scanned["system_kills_fetched_at"] is not None
+    assert present(scanned)["region_ids"] == [10]
+    assert present(scanned)["system_kill_systems"] == 3
+    assert present(scanned)["system_kills_fetched_at"] is not None
 
     modern = {
         **planning_payload(),
@@ -425,7 +384,7 @@ def test_web_scan_scopes_zkill_to_proof_safe_route_reachable_regions(
     }
     highsec = app.scan(scan_body)["snapshot"]
     assert zkill.regions == [10]
-    assert highsec["threat_coverage_region_ids"] == [10]
+    assert present(highsec)["threat_coverage_region_ids"] == [10]
 
     app.scan({**scan_body, "security_bands": ["high", "low"]})
     assert zkill.regions == [10, 10, 11]
@@ -469,13 +428,13 @@ def test_web_contract_region_presets_use_sde_security_and_faction_metadata(
     )
 
     high = app.scan({"region_scope": "security", "security_bands": ["high"]})["snapshot"]
-    assert high["region_ids"] == [10, 12]
+    assert present(high)["region_ids"] == [10, 12]
     low = app.scan({"region_scope": "security", "security_bands": ["low"]})["snapshot"]
-    assert low["region_ids"] == [10]
+    assert present(low)["region_ids"] == [10]
     null = app.scan({"region_scope": "security", "security_bands": ["null"]})["snapshot"]
-    assert null["region_ids"] == [11]
+    assert present(null)["region_ids"] == [11]
     empire = app.scan({"region_scope": "empire", "security_bands": ["high"]})["snapshot"]
-    assert empire["region_ids"] == [10]
+    assert present(empire)["region_ids"] == [10]
     assert app.status()["sde"]["empire_regions"] == 1
 
     with pytest.raises(ValueError, match="contains no regions"):
@@ -509,14 +468,17 @@ def test_web_gate_threat_categories_create_auditable_hard_avoids(
         attacker_weapon_type_ids=(2001,),
         player_attacker_count=1,
     )
-    app.snapshot = replace(
-        app.snapshot,
-        threat_intel_fetched_at=now,
-        threat_window_seconds=86_400,
-        threat_gate_radius_m=250_000,
-        threat_coverage_region_ids=(10,),
-        threat_killmails_seen=20,
-        gate_threat_events=(event,),
+    seed_snapshot(
+        app,
+        replace(
+            app.snapshot,
+            threat_intel_fetched_at=now,
+            threat_window_seconds=86_400,
+            threat_gate_radius_m=250_000,
+            threat_coverage_region_ids=(10,),
+            threat_killmails_seen=20,
+            gate_threat_events=(event,),
+        ),
     )
     body = {
         **planning_payload(),
@@ -560,10 +522,13 @@ def test_web_modern_control_validation_and_missing_activity(
             app.rank({**base, **update})
 
     assert app.snapshot is not None
-    app.snapshot = replace(
-        app.snapshot,
-        system_kills_fetched_at=None,
-        system_kill_activity=(),
+    seed_snapshot(
+        app,
+        replace(
+            app.snapshot,
+            system_kills_fetched_at=None,
+            system_kill_activity=(),
+        ),
     )
     with pytest.raises(ValueError, match="requires system-kill activity"):
         app.rank({**base, "gank_awareness": True, "gank_ship_kill_threshold": 10})
@@ -637,7 +602,7 @@ def test_web_http_boundary_serves_assets_and_rejects_nonlocal_host(
 
         unconfirmed = Request(
             f"{base}/api/execution/start",
-            data=b"{}",
+            data=json.dumps(proposal_input(app)).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -646,10 +611,10 @@ def test_web_http_boundary_serves_assets_and_rejects_nonlocal_host(
         assert error_info.value.code == 400
         started = post_json(
             f"{base}/api/execution/start",
-            {"confirm_locked_acceptance": True},
+            proposal_input(app, {"confirm_locked_acceptance": True}),
         )
         assert started["execution"]["active_count"] == 1
-        assert post_json(f"{base}/api/execution/reset", {}) == {"execution": None}
+        assert post_json(f"{base}/api/execution/reset", {})["execution"] is None
 
         bad_host = Request(f"{base}/api/status", headers={"Host": "evil.example"})
         with pytest.raises(HTTPError) as error_info:

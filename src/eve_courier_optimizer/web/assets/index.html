@@ -92,7 +92,7 @@
             <fieldset>
               <legend>Market scope</legend>
               <div class="field full">
-                <span>Regions <em>search &amp; add</em></span>
+                <label for="region-search">Regions <em>search &amp; add</em></label>
                 <div class="selection-box" id="region-selection">
                   <div class="chip-list" id="region-chips" aria-live="polite"></div>
                   <div class="autocomplete">
@@ -117,7 +117,7 @@
                 <small id="region-scope-help">Security-compatible acquisition keeps mixed regions and skips regions that cannot contain a permitted pickup.</small>
               </div>
               <div class="field full">
-                <span>Start system <em>type to search</em></span>
+                <label for="start">Start system <em>type to search</em></label>
                 <div class="autocomplete">
                   <input
                     id="start"
@@ -145,9 +145,9 @@
                   <small>0 is valid for route-only use with required systems or a finish.</small>
                 </label>
                 <div class="field">
-                  <span>Collateral <em>ISK</em></span>
+                  <label for="collateral-isk">Collateral <em>ISK</em></label>
                   <div class="unit-input">
-                    <input id="collateral-isk" type="text" inputmode="decimal" value="1" required>
+                    <input id="collateral-isk" aria-describedby="collateral-preview" type="text" inputmode="decimal" value="1" required>
                     <select id="collateral-unit" aria-label="Collateral unit">
                       <option value="isk">ISK</option>
                       <option value="k">K</option>
@@ -162,8 +162,8 @@
                 <div class="field">
                   <span>Time budget <em>hours + minutes</em></span>
                   <div class="duration-input">
-                    <label><input id="duration-hours" type="number" min="0" step="1" value="3"><b>h</b></label>
-                    <label><input id="duration-minutes" type="number" min="0" max="59" step="1" value="0"><b>m</b></label>
+                    <label><input id="duration-hours" aria-label="Time budget hours" type="number" min="0" step="1" value="3"><b>h</b></label>
+                    <label><input id="duration-minutes" aria-label="Time budget minutes" type="number" min="0" max="59" step="1" value="0"><b>m</b></label>
                   </div>
                 </div>
                 <label class="field">
@@ -199,7 +199,7 @@
                 <small>CCP's route model uses the unrounded SDE value: high starts at raw 0.45. Every non-empty combination is supported; disallowed bands cannot be used even as transit.</small>
               </div>
               <div class="field full">
-                <span>Avoid systems <em>optional</em></span>
+                <label for="avoid-search">Avoid systems <em>optional</em></label>
                 <div class="selection-box compact-selection" id="avoid-selection">
                   <div class="chip-list" id="avoid-chips" aria-live="polite"></div>
                   <div class="autocomplete">
@@ -226,7 +226,7 @@
                   </span>
                 </label>
                 <div class="field full">
-                  <span>Required route systems <em>optional</em></span>
+                  <label for="required-search">Required route systems <em>optional</em></label>
                   <div class="selection-box compact-selection" id="required-selection">
                     <div class="chip-list" id="required-chips" aria-live="polite"></div>
                     <div class="autocomplete">
@@ -245,7 +245,7 @@
                   <small>Every selected system must be visited at least once; CP-SAT chooses their order.</small>
                 </div>
                 <div class="field full" id="finish-system-field">
-                  <span>Finish system <em>optional when loop is off</em></span>
+                  <label for="finish-system">Finish system <em>optional when loop is off</em></label>
                   <div class="autocomplete">
                     <input
                       id="finish-system"
@@ -309,7 +309,7 @@
                 <p class="risk-disclaimer">
                   Pure NPC/CONCORD losses are excluded. A loss counts only when zKill identifies its
                   location as a gate or the victim position lies inside the selected SDE gate radius.
-                  Coverage and any 1,000-mail truncation are recorded with the proof.
+                  Coverage and any unfinished pagination are recorded with the proof.
                 </p>
               </div>
             </fieldset>

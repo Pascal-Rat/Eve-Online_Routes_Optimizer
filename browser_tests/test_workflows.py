@@ -6,10 +6,8 @@ import pytest
 from playwright.sync_api import Page, expect
 
 from browser_tests.conftest import WebSession
-from eve_courier_optimizer.eve.snapshot_file import write_snapshot
-from tests.conftest import make_contract, make_snapshot
-from tests.web.test_jobs import SlowTransport
-from tests.web.test_server import planning_payload
+from tests.support.scenarios import make_contract, make_snapshot
+from tests.support.web import SlowTransport, planning_payload, proposal_input, seed_snapshot
 
 
 def configure(page: Page) -> None:
@@ -41,7 +39,7 @@ def test_scan_rank_solve_reload_and_execute(page: Page, web_session: WebSession)
     page.locator("#start-execution").click()
     expect(page.locator("#exec-active")).to_have_text("1")
     assert web_session.app.trip is not None
-    web_session.clock.value = web_session.app.trip.current_time + timedelta(seconds=1)
+    web_session.clock.value += timedelta(seconds=1)
     expect(page.locator("#scan-button")).to_be_disabled()
     page.get_by_role("button", name="Record pickup #9001", exact=True).click()
     expect(page.get_by_role("button", name="Record delivery #9001", exact=True)).to_be_visible()
@@ -59,7 +57,7 @@ def test_infeasible_route_keeps_recovery_controls(page: Page, web_session: WebSe
     app, clock = web_session.app, web_session.clock
     app.scan({"regions": [10]})
     app.solve(planning_payload())
-    app.start_execution({"confirm_locked_acceptance": True})
+    app.start_execution(proposal_input(app, {"confirm_locked_acceptance": True}))
     assert app.trip is not None
     clock.value = app.trip.session_deadline - timedelta(seconds=1)
     assert app.replan({"refresh": False})["plan"]["route"] == []
@@ -82,8 +80,9 @@ def test_zero_denominator_rank_renders_without_json_errors(
     page: Page, web_session: WebSession
 ) -> None:
     app, clock = web_session.app, web_session.clock
-    app.snapshot = make_snapshot(clock.value, make_contract(clock.value, 1, 101, 101, collateral=0))
-    write_snapshot(app.snapshot_path, app.snapshot)
+    seed_snapshot(
+        app, make_snapshot(clock.value, make_contract(clock.value, 1, 101, 101, collateral=0))
+    )
     page.goto(web_session.url)
     configure(page)
     page.locator("details").filter(has=page.locator("#service-seconds")).locator("summary").click()
@@ -107,7 +106,7 @@ def test_reload_running_job_and_cancel(page: Page, web_session: WebSession) -> N
     expect(page.locator("#busy-layer")).to_be_hidden()
     expect(page.locator("#scan-button")).to_be_enabled()
     assert web_session.app.snapshot is None
-    assert not web_session.app.snapshot_path.exists()
+    assert web_session.app.artifact("snapshot.json") is None
 
 
 def test_autocomplete_ignores_outdated_and_dismissed_results(

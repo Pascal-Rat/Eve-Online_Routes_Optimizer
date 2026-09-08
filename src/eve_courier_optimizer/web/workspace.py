@@ -2,32 +2,52 @@
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from collections.abc import Callable
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Literal, overload
+from uuid import uuid4
 
 from eve_courier_optimizer import __version__
 from eve_courier_optimizer.application.courier_trip import CourierTrip
-from eve_courier_optimizer.application.plan_file import solve_result_to_dict, write_solve_result
+from eve_courier_optimizer.application.file_lock import WorkspaceConflict
+from eve_courier_optimizer.application.plan_contract import PlanPayload
+from eve_courier_optimizer.application.plan_file import solve_result_to_dict
 from eve_courier_optimizer.application.planner import CourierPlanner, RoutePlan
-from eve_courier_optimizer.application.trip_file import read_trip, write_trip
+from eve_courier_optimizer.application.trip_file import trip_to_dict
 from eve_courier_optimizer.domain import (
     CollateralMode,
     ContractSnapshot,
     parse_esi_datetime,
 )
 from eve_courier_optimizer.eve.esi import EsiClient, utc_now
-from eve_courier_optimizer.eve.snapshot_file import read_snapshot, write_snapshot
+from eve_courier_optimizer.eve.snapshot_file import snapshot_to_dict
 from eve_courier_optimizer.eve.zkill import ZkillClient
-from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.universe import UniverseGraph
 from eve_courier_optimizer.web import requests, responses
-
-JsonObject = dict[str, Any]
+from eve_courier_optimizer.web.contracts import (
+    ExecutionResponse,
+    OperationResponse,
+    PlanResponse,
+    RankResponse,
+    ScanResponse,
+    StatusResponse,
+    Suggestion,
+    Suggestions,
+    TransitionIdentity,
+)
+from eve_courier_optimizer.web.operations import (
+    Operation,
+    OperationResult,
+    Ranking,
+    ScanObservation,
+    compute_operation,
+)
+from eve_courier_optimizer.web.workspace_store import WorkspaceStore
 
 
 def default_workspace_path() -> Path:
@@ -40,6 +60,13 @@ def default_workspace_path() -> Path:
     xdg_data_home = os.environ.get("XDG_DATA_HOME")
     base = Path(xdg_data_home) if xdg_data_home else Path.home() / ".local" / "share"
     return base / "eve-courier-route-optimizer"
+
+
+@dataclass(frozen=True, slots=True)
+class _Proposal:
+    id: str
+    revision: int
+    plan: RoutePlan
 
 
 class PlanningWorkspace:
@@ -56,71 +83,193 @@ class PlanningWorkspace:
     ) -> None:
         self.graph = graph
         self.esi = esi
-        self.zkill = zkill
-        self.planner = CourierPlanner(graph, esi, zkill)
+        self.planner = CourierPlanner(graph, esi, zkill, clock=clock)
         self.clock = clock
-        self.workspace = workspace
-        self.workspace.mkdir(parents=True, exist_ok=True)
-        self.snapshot_path = workspace / "snapshot.json"
-        self.plan_path = workspace / "plan.json"
-        self.trip_path = workspace / "execution.json"
-        self.snapshot: ContractSnapshot | None = None
-        self.plan: RoutePlan | None = None
-        self.trip: CourierTrip | None = None
-        self.plan_payload: JsonObject | None = None
-        self._restore_saved_files()
+        self.workspace = workspace.resolve()
+        self.store = WorkspaceStore(self.workspace)
+        self._state = self.store.load()
+        self._proposal: _Proposal | None = None
+        self._plan_payload = self._decorate(self._state.plan, self._state.observation, self.trip)
 
-    def _restore_saved_files(self) -> None:
-        if self.snapshot_path.exists():
-            snapshot = read_snapshot(self.snapshot_path)
-            if snapshot.sde_build_number == self.graph.metadata.build_number:
-                self.snapshot = snapshot
-        if self.trip_path.exists():
-            self.trip = read_trip(self.trip_path)
-        if self.plan_path.exists():
-            raw = json.loads(self.plan_path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                return
-            raw = cast(JsonObject, raw)
-            scope = raw.get("scope")
-            if (
-                raw.get("schema_version") == 3
-                and isinstance(scope, dict)
-                and self.snapshot is not None
-                and cast(dict[str, object], scope).get("snapshot_fetched_at")
-                == self.snapshot.fetched_at.isoformat()
-                and cast(dict[str, object], scope).get("sde_build_number")
-                == self.graph.metadata.build_number
-            ):
-                self.plan_payload = responses.decorate_plan(
-                    raw, self.graph, self.snapshot, self.trip
-                )
+    @property
+    def zkill(self) -> ZkillClient | None:
+        return self.planner.zkill
 
-    def discard_plan(self) -> None:
-        self.plan_path.unlink(missing_ok=True)
-        self.plan = None
-        self.plan_payload = None
+    @property
+    def revision(self) -> int:
+        return self._state.revision
 
-    def _require_snapshot(self) -> ContractSnapshot:
-        if self.snapshot is None:
-            raise ValueError("scan at least one region before ranking or solving")
-        return self.snapshot
+    @property
+    def observation(self) -> ContractSnapshot | None:
+        """Acquisition metadata remains available across an SDE upgrade for a safe refresh."""
+        return self._state.observation
 
-    def save_plan(self, plan: RoutePlan) -> JsonObject:
-        problem, result = plan.problem, plan.result
-        write_solve_result(self.plan_path, result, problem)
-        self.plan = plan
-        self.plan_payload = responses.decorate_plan(
-            solve_result_to_dict(result, problem),
-            self.graph,
-            self.snapshot,
-            self.trip,
+    @property
+    def snapshot(self) -> ContractSnapshot | None:
+        observation = self.observation
+        return (
+            observation
+            if observation is not None
+            and observation.sde_build_number == self.graph.metadata.build_number
+            else None
         )
-        return self.plan_payload
 
-    def status(self) -> JsonObject:
+    @property
+    def trip(self) -> CourierTrip | None:
+        return self._state.trip
+
+    @property
+    def plan(self) -> RoutePlan | None:
+        return self._proposal.plan if self._proposal is not None else None
+
+    @property
+    def proposal_id(self) -> str | None:
+        return self._proposal.id if self._proposal is not None else None
+
+    @property
+    def plan_payload(self) -> PlanPayload | None:
+        return deepcopy(self._plan_payload)
+
+    def _decorate(
+        self,
+        raw: PlanPayload | None,
+        observation: ContractSnapshot | None,
+        trip: CourierTrip | None,
+    ) -> PlanPayload | None:
+        if (
+            raw is None
+            or observation is None
+            or observation.sde_build_number != self.graph.metadata.build_number
+        ):
+            return None
+        scope = raw["scope"]
+        if (
+            scope.get("snapshot_fetched_at") != observation.fetched_at.isoformat()
+            or scope.get("sde_build_number") != self.graph.metadata.build_number
+        ):
+            return None
+        return responses.decorate_plan(deepcopy(raw), self.graph, observation, trip)
+
+    def _commit(
+        self,
+        *,
+        observation: ContractSnapshot | None,
+        trip: CourierTrip | None,
+        raw_plan: PlanPayload | None,
+        proposal: RoutePlan | None = None,
+    ) -> None:
+        # Finish all fallible serialization/formatting before the single durable commit.
+        display = self._decorate(raw_plan, observation, trip)
+        proposed = (
+            _Proposal(uuid4().hex, self.revision + 1, proposal) if proposal is not None else None
+        )
+        state = self.store.commit(
+            expected_revision=self.revision,
+            observation=observation,
+            trip=trip,
+            plan=raw_plan,
+        )
+        self._state = state
+        self._plan_payload = display
+        self._proposal = proposed
+
+    def _transition_identity(self) -> TransitionIdentity:
+        return {"revision": self.revision, "proposal_id": self.proposal_id}
+
+    def require_revision(self, body: dict[str, object], *, required: bool = False) -> None:
+        expected = body.get("expected_revision")
+        if (required or expected is not None) and (
+            type(expected) is not int or expected != self.revision
+        ):
+            raise WorkspaceConflict("the workspace changed; reload and review the current proposal")
+
+    def publish(self, result: OperationResult, *, expected_revision: int) -> OperationResponse:
+        if expected_revision != self.revision:
+            raise WorkspaceConflict(
+                "the workspace changed while this operation ran; reload and retry"
+            )
+        if isinstance(result, Ranking):
+            return {
+                **responses.ranked_contracts(result.problem, self.graph),
+                **self._transition_identity(),
+            }
+        if isinstance(result, ScanObservation):
+            if self.trip is not None:
+                raise ValueError("an execution session already exists; use Replan")
+            self._commit(observation=result.snapshot, trip=self.trip, raw_plan=None)
+            return {
+                "snapshot": responses.snapshot_summary(self.snapshot, self.graph),
+                **self._transition_identity(),
+            }
+        self._commit(
+            observation=result.snapshot,
+            trip=self.trip,
+            raw_plan=solve_result_to_dict(result.plan.result, result.plan.problem),
+            proposal=result.plan,
+        )
+        displayed = self.plan_payload
+        assert displayed is not None
+        return {
+            "snapshot": responses.snapshot_summary(self.snapshot, self.graph),
+            "plan": displayed,
+            "execution": responses.trip_response(self.trip, self.graph, self.clock()),
+            **self._transition_identity(),
+        }
+
+    @overload
+    def _operate(
+        self, operation: Literal[Operation.SCAN], body: dict[str, object]
+    ) -> ScanResponse: ...
+
+    @overload
+    def _operate(
+        self, operation: Literal[Operation.RANK], body: dict[str, object]
+    ) -> RankResponse: ...
+
+    @overload
+    def _operate(
+        self, operation: Literal[Operation.SOLVE], body: dict[str, object]
+    ) -> PlanResponse: ...
+
+    @overload
+    def _operate(
+        self, operation: Literal[Operation.REPLAN], body: dict[str, object]
+    ) -> PlanResponse: ...
+
+    def _operate(self, operation: Operation, body: dict[str, object]) -> OperationResponse:
+        self.require_revision(body)
+        revision = self.revision
+        result = compute_operation(
+            operation,
+            self.planner,
+            body,
+            observation=self.observation,
+            trip=self.trip,
+            at=self.clock(),
+        )
+        return self.publish(result, expected_revision=revision)
+
+    def artifact(self, filename: str) -> object | None:
+        return {
+            "snapshot.json": snapshot_to_dict(self.observation)
+            if self.observation is not None
+            else None,
+            "plan.json": deepcopy(self._state.plan),
+            "execution.json": trip_to_dict(self.trip) if self.trip is not None else None,
+        }.get(filename)
+
+    def status(self) -> StatusResponse:
+        latest = self.store.load()
+        if latest.revision != self.revision:
+            display = self._decorate(latest.plan, latest.observation, latest.trip)
+            self._state = latest
+            self._proposal = None
+            self._plan_payload = display
         return {
             "app_version": __version__,
+            **self._transition_identity(),
+            "warnings": list(self._state.warnings),
+            "snapshot_requires_refresh": self.observation is not None and self.snapshot is None,
             "sde": {
                 "build_number": self.graph.metadata.build_number,
                 "release_date": self.graph.metadata.release_date,
@@ -135,81 +284,51 @@ class PlanningWorkspace:
             "plan_armable": self.plan is not None
             and self.plan.result.certificate.feasibility_verified,
             "artifacts": {
-                "snapshot": self.snapshot_path.exists(),
-                "plan": self.plan_path.exists(),
-                "execution": self.trip_path.exists(),
+                "snapshot": self.observation is not None,
+                "plan": self._state.plan is not None,
+                "execution": self.trip is not None,
             },
         }
 
-    def region_matches(self, query: str) -> JsonObject:
+    def region_matches(self, query: str) -> Suggestions:
         needle = query.casefold().strip()
-        matches = [
-            {"id": region.region_id, "name": region.name}
+        matches: list[Suggestion] = [
+            Suggestion(id=region.region_id, name=region.name)
             for region in sorted(self.graph.regions.values(), key=lambda item: item.name)
             if not needle or needle in region.name.casefold()
         ][:50]
         return {"items": matches}
 
-    def system_matches(self, query: str) -> JsonObject:
+    def system_matches(self, query: str) -> Suggestions:
         needle = query.casefold().strip()
         if len(needle) < 2:
             return {"items": []}
-        matches = [
-            {
-                "id": system.system_id,
-                "name": system.name,
-                "security_status": system.security_status,
-            }
+        matches: list[Suggestion] = [
+            Suggestion(
+                id=system.system_id,
+                name=system.name,
+                security_status=system.security_status,
+            )
             for system in sorted(self.graph.systems.values(), key=lambda item: item.name)
             if needle in system.name.casefold()
         ][:30]
         return {"items": matches}
 
-    def scan(self, body: dict[str, object]) -> JsonObject:
-        if self.trip is not None:
-            raise ValueError("an execution session already exists; use Replan")
-        request = requests.ScanRequest.from_json(body, self.graph)
-        snapshot = self.planner.scan(
-            request.region_ids,
-            include_threat_intel=request.include_threat_intel,
-            threat_window_seconds=request.threat_window_seconds,
-            threat_gate_radius_m=request.threat_gate_radius_m,
-            threat_region_ids=request.threat_region_ids,
-        )
-        self.discard_plan()
-        write_snapshot(self.snapshot_path, snapshot)
-        self.snapshot = snapshot
-        return {"snapshot": responses.snapshot_summary(self.snapshot, self.graph)}
+    def scan(self, body: dict[str, object]) -> ScanResponse:
+        return self._operate(Operation.SCAN, body)
 
-    def rank(self, body: dict[str, object]) -> JsonObject:
-        if self.trip is not None:
-            raise ValueError("an execution session already exists; use Replan")
-        snapshot = self._require_snapshot()
-        request = requests.PlanRequest.from_json(body, snapshot, self.graph, self.clock())
-        problem = RouteProblem.from_snapshot(
-            snapshot,
-            self.graph,
-            request.constraints,
-            max_candidates=request.max_candidates,
-        )
-        return responses.ranked_contracts(problem, self.graph)
+    def rank(self, body: dict[str, object]) -> RankResponse:
+        return self._operate(Operation.RANK, body)
 
-    def solve(self, body: dict[str, object]) -> JsonObject:
-        snapshot = self._require_snapshot()
-        if self.trip is not None:
-            raise ValueError(
-                "an execution session already exists; use Replan or reset the session first"
+    def solve(self, body: dict[str, object]) -> PlanResponse:
+        return self._operate(Operation.SOLVE, body)
+
+    def start_execution(self, body: dict[str, object]) -> ExecutionResponse:
+        self.require_revision(body, required=True)
+        if self._proposal is None or body.get("proposal_id") != self._proposal.id:
+            raise WorkspaceConflict(
+                "this proposal is no longer current; reload and review before applying it"
             )
-        request = requests.PlanRequest.from_json(body, snapshot, self.graph, self.clock())
-        plan = self.planner.solve(
-            snapshot,
-            request.constraints,
-            max_candidates=request.max_candidates,
-            solver_config=requests.read_solver_config(body),
-        )
-        return {"plan": self.save_plan(plan)}
-
-    def start_execution(self, body: dict[str, object]) -> JsonObject:
         if self.plan is None:
             raise ValueError("solve a route in this server session before starting execution")
         if not self.plan.result.certificate.feasibility_verified:
@@ -230,14 +349,15 @@ class PlanningWorkspace:
             at=max(self.clock(), constraints.snapshot_time),
             previous=self.trip,
         )
-        write_trip(self.trip_path, state)
-        self.trip = state
-        # A solved route may only be armed once. Subsequent state changes must flow through
-        # explicit pickup/delivery transitions and a fresh replan, never by replaying stale state.
-        self.plan = None
-        return {"execution": responses.trip_response(self.trip, self.graph, self.clock())}
+        self._commit(observation=self.observation, trip=state, raw_plan=self._state.plan)
+        return {
+            "execution": responses.trip_response(self.trip, self.graph, self.clock()),
+            "plan": self.plan_payload,
+            **self._transition_identity(),
+        }
 
-    def record_action(self, body: dict[str, object]) -> JsonObject:
+    def record_action(self, body: dict[str, object]) -> ExecutionResponse:
+        self.require_revision(body)
         if self.trip is None:
             raise ValueError("start an execution session before recording an action")
         action = str(body.get("action", ""))
@@ -260,40 +380,23 @@ class PlanningWorkspace:
                 state = self.trip.deliver(contract_id, at)
         else:
             raise ValueError("action must be 'pickup', 'delivery', or 'route_system'")
-        write_trip(self.trip_path, state)
-        self.trip = state
-        self.plan = None
-        return {"execution": responses.trip_response(self.trip, self.graph, self.clock())}
-
-    def replan(self, body: dict[str, object]) -> JsonObject:
-        if self.trip is None:
-            raise ValueError("start an execution session before replanning")
-        snapshot = self._require_snapshot()
-        request = requests.ReplanRequest.from_json(body)
-        if request.refresh_snapshot:
-            snapshot = self.planner.refresh_for_trip(snapshot, self.trip, at=self.clock())
-            write_snapshot(self.snapshot_path, snapshot)
-            self.snapshot = snapshot
-        plan = self.planner.replan(
-            snapshot,
-            self.trip,
-            max_candidates=request.max_candidates,
-            solver_config=request.solver_config,
-            at=self.clock(),
-        )
+        self._commit(observation=self.observation, trip=state, raw_plan=self._state.plan)
         return {
-            "snapshot": responses.snapshot_summary(self.snapshot, self.graph),
-            "plan": self.save_plan(plan),
             "execution": responses.trip_response(self.trip, self.graph, self.clock()),
+            "plan": self.plan_payload,
+            **self._transition_identity(),
         }
 
-    def reset_execution(self) -> JsonObject:
-        self.trip_path.unlink(missing_ok=True)
-        self.trip = None
-        self.plan = None
-        return {"execution": None}
+    def replan(self, body: dict[str, object]) -> PlanResponse:
+        return self._operate(Operation.REPLAN, body)
 
-    def extend_horizon(self, body: dict[str, object]) -> JsonObject:
+    def reset_execution(self, body: dict[str, object] | None = None) -> ExecutionResponse:
+        self.require_revision(body or {})
+        self._commit(observation=self.observation, trip=None, raw_plan=None)
+        return {"execution": None, "plan": None, **self._transition_identity()}
+
+    def extend_horizon(self, body: dict[str, object]) -> ExecutionResponse:
+        self.require_revision(body)
         if self.trip is None:
             raise ValueError("start an execution session before extending its horizon")
         minutes = requests.FormFields(body).optional_integer("minutes", minimum=1)
@@ -302,10 +405,9 @@ class PlanningWorkspace:
         state = self.trip.extend_horizon(
             additional_seconds=minutes * 60, at=max(self.clock(), self.trip.current_time)
         )
-        write_trip(self.trip_path, state)
-        self.trip = state
-        self.discard_plan()
+        self._commit(observation=self.observation, trip=state, raw_plan=None)
         return {
             "execution": responses.trip_response(self.trip, self.graph, self.clock()),
             "plan": None,
+            **self._transition_identity(),
         }

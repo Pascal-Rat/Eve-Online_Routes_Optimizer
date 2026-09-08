@@ -1,6 +1,8 @@
-import { $, $$, fmtNumber, fmtISK, showNotice } from "./display.js";
+import { $, inputs, field, fmtNumber, fmtISK, showNotice } from "./display.js";
 import { wireAutocomplete } from "./autocomplete.js";
 
+/** @typedef {{id?: number, name: string}} Selection */
+/** @typedef {"security" | "empire" | "all" | "selected"} RegionScope */
 const defaults = {
   start: "Jita",
   "cargo-m3": "62500",
@@ -20,6 +22,7 @@ const defaults = {
   "max-candidates": "",
 };
 
+/** @param {Selection} left @param {Selection} right */
 function sameSelection(left, right) {
   if (left.id !== null && left.id !== undefined && right.id !== null && right.id !== undefined) {
     return String(left.id) === String(right.id);
@@ -27,6 +30,7 @@ function sameSelection(left, right) {
   return String(left.name).toLocaleLowerCase() === String(right.name).toLocaleLowerCase();
 }
 
+/** @param {Selection} item @param {() => void} onRemove @param {string} [extraClass] */
 function selectionChip(item, onRemove, extraClass = "") {
   const chip = document.createElement("span");
   chip.className = `selection-chip${extraClass ? ` ${extraClass}` : ""}`;
@@ -43,10 +47,15 @@ function selectionChip(item, onRemove, extraClass = "") {
 
 export class PlanningForm {
   constructor() {
+    /** @type {RegionScope} */
     this.regionScope = "security";
+    /** @type {Selection[]} */
     this.selectedRegions = [];
+    /** @type {Selection[]} */
     this.avoidedSystems = [];
+    /** @type {Selection[]} */
     this.requiredSystems = [];
+    /** @type {import("./contracts").SnapshotSummary | null} */
     this.snapshot = null;
     this.wireEvents();
   }
@@ -66,7 +75,7 @@ export class PlanningForm {
       collateral_unit: $("#collateral-unit").value,
       duration_hours: $("#duration-hours").value,
       duration_minutes: $("#duration-minutes").value,
-      security_bands: $$('input[name="security-band"]:checked').map((input) => input.value),
+      security_bands: inputs('input[name="security-band"]:checked').map((input) => input.value),
       collateral_mode: $("#collateral-mode").value,
       avoid_systems: this.avoidedSystems.map((item) => item.id || item.name),
       required_systems: this.requiredSystems.map((item) => item.id || item.name),
@@ -74,7 +83,7 @@ export class PlanningForm {
       finish_system: finish,
       max_simultaneous_contracts: simultaneousCap === "" ? null : simultaneousCap,
       gank_awareness: $("#gank-awareness").checked,
-      threat_categories: $$('input[name="threat-category"]:checked').map((input) => input.value),
+      threat_categories: inputs('input[name="threat-category"]:checked').map((input) => input.value),
       threat_min_events: $("#threat-min-events").value,
       seconds_per_jump: $("#seconds-per-jump").value,
       service_seconds: $("#service-seconds").value,
@@ -84,6 +93,7 @@ export class PlanningForm {
     };
   }
 
+  /** @param {import("./contracts").PlanPayload | null} plan */
   hydratePlannerFromPlan(plan) {
     const model = plan?.model;
     if (!model) return;
@@ -102,7 +112,7 @@ export class PlanningForm {
     let collateralUnit = "isk";
     if (/^\d+$/.test(collateralText)) {
       const amount = BigInt(collateralText);
-      for (const [unit, factor] of [["b", 1_000_000_000n], ["m", 1_000_000n], ["k", 1_000n]]) {
+      for (const [unit, factor] of /** @type {[string, bigint][]} */ ([["b", 1_000_000_000n], ["m", 1_000_000n], ["k", 1_000n]])) {
         if (amount >= factor && amount % factor === 0n) {
           collateralValue = String(amount / factor);
           collateralUnit = unit;
@@ -123,7 +133,7 @@ export class PlanningForm {
       : String(model.max_simultaneous_contracts);
 
     const allowedBands = new Set(model.allowed_security_bands || []);
-    $$('.security-option input[name="security-band"]').forEach((input) => {
+    inputs('.security-option input[name="security-band"]').forEach((input) => {
       input.checked = allowedBands.has(input.value);
     });
     this.avoidedSystems = (model.avoided_systems || []).map((system) => ({
@@ -148,7 +158,7 @@ export class PlanningForm {
     const threatCategories = new Set(model.threat_categories || []);
     const threatEnabled = threatCategories.size > 0;
     $("#gank-awareness").checked = threatEnabled;
-    $$('input[name="threat-category"]').forEach((input) => {
+    inputs('input[name="threat-category"]').forEach((input) => {
       input.checked = threatCategories.has(input.value);
     });
     $("#gank-settings").classList.toggle("hidden", !threatEnabled);
@@ -158,7 +168,7 @@ export class PlanningForm {
     if (model.threat_window_seconds) {
       $("#threat-window-hours").value = String(Number(model.threat_window_seconds) / 3600);
     }
-    if (model.threat_gate_radius_m) {
+    if (model.threat_gate_radius_m !== null && model.threat_gate_radius_m !== undefined) {
       $("#threat-gate-radius-km").value = String(Number(model.threat_gate_radius_m) / 1000);
     }
     if (model.seconds_per_jump) $("#seconds-per-jump").value = String(model.seconds_per_jump);
@@ -182,7 +192,7 @@ export class PlanningForm {
       empire: "NPC Empire space",
       all: "All SDE regions",
     };
-    if (preset) {
+    if (this.regionScope !== "selected") {
       chips.append(selectionChip({ name: labels[this.regionScope] }, () => this.setRegionScope("selected"), "all"));
     } else {
       this.selectedRegions.forEach((item) => {
@@ -200,7 +210,7 @@ export class PlanningForm {
     if (this.regionScope === "all") {
       $("#region-scope-help").textContent = "Every SDE region is in contract scope; this is the broadest and slowest preset.";
     } else if (this.regionScope === "security") {
-      const bands = $$('input[name="security-band"]:checked').map((input) => input.value).join(" + ");
+      const bands = inputs('input[name="security-band"]:checked').map((input) => input.value).join(" + ");
       $("#region-scope-help").textContent = `Only regions containing ${bands || "selected"} systems are scanned; mixed-security regions are kept, so this does not drop an eligible pickup region.`;
     } else if (this.regionScope === "empire") {
       $("#region-scope-help").textContent = "SDE faction-owned high/low Empire regions only; player-sovereign and NPC nullsec are excluded.";
@@ -209,6 +219,7 @@ export class PlanningForm {
     }
   }
 
+  /** @param {RegionScope} scope */
   setRegionScope(scope) {
     this.regionScope = scope;
     this.renderRegionPicker();
@@ -260,6 +271,7 @@ export class PlanningForm {
     }
     const suffix = match[2].toLowerCase();
     const unit = suffix || $("#collateral-unit").value;
+    /** @type {Record<string, number>} */
     const multipliers = { isk: 1, k: 1e3, m: 1e6, b: 1e9 };
     const amount = Number(match[1]) * multipliers[unit];
     $("#collateral-preview").textContent = Number.isFinite(amount)
@@ -350,7 +362,7 @@ export class PlanningForm {
 
   wireEvents() {
     $("#reset-defaults").addEventListener("click", () => {
-      for (const [id, value] of Object.entries(defaults)) $(`#${id}`).value = value;
+      for (const [id, value] of Object.entries(defaults)) field(`#${id}`).value = value;
       delete $("#start").dataset.systemId;
       this.regionScope = "security";
       this.selectedRegions = [];
@@ -359,9 +371,9 @@ export class PlanningForm {
       $("#return-to-start").checked = true;
       $("#finish-system").value = "";
       delete $("#finish-system").dataset.systemId;
-      $$('input[name="security-band"]').forEach((input) => { input.checked = input.value === "high"; });
+      inputs('input[name="security-band"]').forEach((input) => { input.checked = input.value === "high"; });
       $("#gank-awareness").checked = false;
-      $$('input[name="threat-category"]').forEach((input) => {
+      inputs('input[name="threat-category"]').forEach((input) => {
         input.checked = input.value !== "any_gate_pvp";
       });
       $("#gank-settings").classList.add("hidden");
@@ -382,9 +394,9 @@ export class PlanningForm {
       this.selectedRegions = [];
       this.renderRegionPicker();
     });
-    $$('input[name="security-band"]').forEach((input) => {
+    inputs('input[name="security-band"]').forEach((input) => {
       input.addEventListener("change", () => {
-        if (!$$('input[name="security-band"]:checked').length) {
+        if (!inputs('input[name="security-band"]:checked').length) {
           input.checked = true;
           showNotice("warning", "One security band is required.", "High, low and null can be combined freely, but the allowed set cannot be empty.");
         }
@@ -399,9 +411,9 @@ export class PlanningForm {
         showNotice("info", "Gate intel snapshot needed.", "The next scan will collect cached, rate-spaced zKill killmails for every route-reachable threat region.");
       }
     });
-    $$('input[name="threat-category"]').forEach((input) => {
+    inputs('input[name="threat-category"]').forEach((input) => {
       input.addEventListener("change", () => {
-        if ($("#gank-awareness").checked && !$$('input[name="threat-category"]:checked').length) {
+        if ($("#gank-awareness").checked && !inputs('input[name="threat-category"]:checked').length) {
           input.checked = true;
           showNotice("warning", "One threat category is required.", "Choose the gate evidence that should create hard system avoids.");
         }

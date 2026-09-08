@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+from contextlib import ExitStack
 from datetime import UTC, datetime
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
 
+from eve_courier_optimizer.application.file_lock import directory_write_lock
 from eve_courier_optimizer.application.plan_file import write_solve_result
 from eve_courier_optimizer.application.planner import CourierPlanner
 from eve_courier_optimizer.application.trip_file import read_trip, write_trip
@@ -544,37 +546,53 @@ def main(argv: list[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     try:
         graph = load_bundled_graph()
-        if arguments.handler == "sde-info":
-            print(
-                f"SDE build {graph.metadata.build_number}, released {graph.metadata.release_date}; "
-                f"{len(graph.systems)} systems, {len(graph.station_systems)} NPC stations"
-            )
-            return 0
-        if arguments.handler == "scan":
-            return _run_scan(arguments, graph)
-        if arguments.handler == "rank":
-            return _run_rank(arguments, graph)
-        if arguments.handler == "solve":
-            return _run_solve(arguments, graph)
-        if arguments.handler == "replan":
-            return _run_replan(arguments, graph)
-        if arguments.handler == "advance":
-            return _run_advance(arguments, graph)
-        if arguments.handler == "extend":
-            state = read_trip(arguments.state).extend_horizon(
-                additional_seconds=arguments.minutes * 60, at=_parse_time(arguments.at)
-            )
-            write_trip(arguments.output, state)
-            print(f"planning horizon extended to {state.session_deadline.isoformat()}")
-            return 0
-        if arguments.handler == "web":
-            return run_local_web_ui(
-                graph,
-                port=arguments.port,
-                workspace=arguments.workspace,
-                open_browser=not arguments.no_browser,
-            )
-        raise AssertionError(f"unknown handler {arguments.handler}")
+        paths = {
+            value.resolve()
+            for key in ("snapshot", "state", "output", "state_output")
+            if isinstance(value := getattr(arguments, key, None), Path)
+        }
+        with ExitStack() as locks:
+            for directory in sorted({path.parent for path in paths}):
+                locks.enter_context(directory_write_lock(directory))
+            managed_names = {"workspace.json", "snapshot.json", "plan.json", "execution.json"}
+            for path in paths:
+                if path.name in managed_names and (path.parent / "workspace.json").exists():
+                    raise ValueError(
+                        "these files belong to the web workspace; download an artifact to a "
+                        "separate directory before using standalone CLI commands"
+                    )
+            if arguments.handler == "sde-info":
+                print(
+                    f"SDE build {graph.metadata.build_number}, "
+                    f"released {graph.metadata.release_date}; "
+                    f"{len(graph.systems)} systems, {len(graph.station_systems)} NPC stations"
+                )
+                return 0
+            if arguments.handler == "scan":
+                return _run_scan(arguments, graph)
+            if arguments.handler == "rank":
+                return _run_rank(arguments, graph)
+            if arguments.handler == "solve":
+                return _run_solve(arguments, graph)
+            if arguments.handler == "replan":
+                return _run_replan(arguments, graph)
+            if arguments.handler == "advance":
+                return _run_advance(arguments, graph)
+            if arguments.handler == "extend":
+                state = read_trip(arguments.state).extend_horizon(
+                    additional_seconds=arguments.minutes * 60, at=_parse_time(arguments.at)
+                )
+                write_trip(arguments.output, state)
+                print(f"planning horizon extended to {state.session_deadline.isoformat()}")
+                return 0
+            if arguments.handler == "web":
+                return run_local_web_ui(
+                    graph,
+                    port=arguments.port,
+                    workspace=arguments.workspace,
+                    open_browser=not arguments.no_browser,
+                )
+            raise AssertionError(f"unknown handler {arguments.handler}")
     except (OSError, RuntimeError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

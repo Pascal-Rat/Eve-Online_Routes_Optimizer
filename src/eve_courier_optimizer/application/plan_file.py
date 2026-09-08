@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
+from eve_courier_optimizer.application.plan_contract import (
+    PlanPayload,
+)
+from eve_courier_optimizer.application.plan_contract import (
+    validate_saved_plan as validate_saved_plan,
+)
 from eve_courier_optimizer.domain import SolveResult, isk_units_to_decimal, volume_units_to_decimal
 from eve_courier_optimizer.jsonio import write_json
 from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.security import security_policy_to_dict
 
 
-def solve_result_to_dict(result: SolveResult, problem: RouteProblem) -> dict[str, Any]:
+def solve_result_to_dict(result: SolveResult, problem: RouteProblem) -> PlanPayload:
     """Map domain objects to the versioned, stable JSON response schema."""
 
     certificate = result.certificate
-    return {
+    payload = {
         "schema_version": 3,
         "summary": {
             "selected_contract_ids": list(result.selected_contract_ids),
@@ -139,6 +144,8 @@ def solve_result_to_dict(result: SolveResult, problem: RouteProblem) -> dict[str
             for leg in result.travel_legs
         ],
     }
+
+    return validate_saved_plan(payload)
 
 
 def write_solve_result(path: Path, result: SolveResult, problem: RouteProblem) -> None:

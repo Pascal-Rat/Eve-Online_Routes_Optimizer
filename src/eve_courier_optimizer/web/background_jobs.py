@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
-import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,25 +11,18 @@ from datetime import datetime
 from enum import StrEnum
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
-from pathlib import Path
-from typing import Any
+from typing import Literal
 from uuid import uuid4
 
 from eve_courier_optimizer.application.courier_trip import CourierTrip
-from eve_courier_optimizer.application.planner import RoutePlan
+from eve_courier_optimizer.application.planner import CourierPlanner
 from eve_courier_optimizer.domain import ContractSnapshot
 from eve_courier_optimizer.eve.esi import EsiClient, EsiError
-from eve_courier_optimizer.eve.snapshot_file import write_snapshot
 from eve_courier_optimizer.eve.zkill import ZkillClient, ZkillError
 from eve_courier_optimizer.routing.universe import UniverseGraph
+from eve_courier_optimizer.web.contracts import JobFields, JobPayload, OperationResponse
+from eve_courier_optimizer.web.operations import Operation, OperationResult, compute_operation
 from eve_courier_optimizer.web.workspace import PlanningWorkspace
-
-
-class Operation(StrEnum):
-    SCAN = "scan"
-    RANK = "rank"
-    SOLVE = "solve"
-    REPLAN = "replan"
 
 
 class JobStatus(StrEnum):
@@ -40,29 +32,48 @@ class JobStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+@dataclass(frozen=True, slots=True)
+class Failed:
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedResult:
+    result: OperationResponse
+
+
 @dataclass(slots=True)
 class Job:
     id: str
     operation: Operation
-    status: JobStatus = JobStatus.RUNNING
     progress: str = "Starting"
     elapsed_seconds: float = 0.0
-    result: dict[str, Any] | None = None
-    error: str | None = None
+    outcome: Literal[JobStatus.RUNNING, JobStatus.CANCELLED] | PublishedResult | Failed = (
+        JobStatus.RUNNING
+    )
 
-    def to_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
+    @property
+    def status(self) -> JobStatus:
+        if isinstance(self.outcome, PublishedResult):
+            return JobStatus.COMPLETED
+        if isinstance(self.outcome, Failed):
+            return JobStatus.FAILED
+        return self.outcome
+
+    def to_dict(self) -> JobPayload:
+        common: JobFields = {
             "id": self.id,
             "operation": self.operation.value,
-            "status": self.status.value,
             "progress": self.progress,
             "elapsed_seconds": self.elapsed_seconds,
         }
-        if self.result is not None:
-            payload["result"] = self.result
-        if self.error is not None:
-            payload["error"] = self.error
-        return payload
+        if isinstance(self.outcome, PublishedResult):
+            return {**common, "status": "completed", "result": self.outcome.result}
+        if isinstance(self.outcome, Failed):
+            return {**common, "status": "failed", "error": self.outcome.message}
+        if self.outcome is JobStatus.RUNNING:
+            return {**common, "status": "running"}
+        return {**common, "status": "cancelled"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +84,7 @@ class JobInputs:
     clock: Callable[[], datetime]
     snapshot: ContractSnapshot | None
     trip: CourierTrip | None
+    revision: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,45 +94,36 @@ class Progress:
 
 @dataclass(frozen=True, slots=True)
 class Completed:
-    payload: dict[str, Any]
-    snapshot: ContractSnapshot | None
-    plan: RoutePlan | None
-
-
-@dataclass(frozen=True, slots=True)
-class Failed:
-    message: str
+    result: OperationResult
+    expected_revision: int
 
 
 def _run_job(
     inputs: JobInputs,
     operation: Operation,
     body: dict[str, object],
-    workspace: str,
     connection: Connection,
 ) -> None:
     try:
-        session = PlanningWorkspace(
-            inputs.graph, inputs.esi, Path(workspace), inputs.zkill, clock=inputs.clock
-        )
-        session.snapshot = inputs.snapshot
-        session.trip = inputs.trip
 
         def report_progress(message: str) -> None:
             connection.send(Progress(message))
 
-        session.planner.progress = report_progress
-        if session.zkill is not None:
+        planner = CourierPlanner(
+            inputs.graph, inputs.esi, inputs.zkill, progress=report_progress, clock=inputs.clock
+        )
+        if inputs.zkill is not None:
             # Cancellation can interrupt a request; preserve request spacing across workers.
-            session.zkill.defer_next_request()
-        action = {
-            Operation.SCAN: session.scan,
-            Operation.RANK: session.rank,
-            Operation.SOLVE: session.solve,
-            Operation.REPLAN: session.replan,
-        }[operation]
-        payload = action(body)
-        connection.send(Completed(payload, session.snapshot, session.plan))
+            inputs.zkill.defer_next_request()
+        result = compute_operation(
+            operation,
+            planner,
+            body,
+            observation=inputs.snapshot,
+            trip=inputs.trip,
+            at=inputs.clock(),
+        )
+        connection.send(Completed(result, inputs.revision))
     except Exception as error:
         # This is the process boundary: uncaught failures must reach the operator.
         if not isinstance(error, (ValueError, EsiError, ZkillError)):
@@ -134,7 +137,6 @@ def _run_job(
 class _Worker:
     process: BaseProcess
     connection: Connection
-    workspace: tempfile.TemporaryDirectory[str]
     started: float
 
     def close(self) -> None:
@@ -148,7 +150,6 @@ class _Worker:
                 self.process.join(timeout=1)
         self.process.close()
         self.connection.close()
-        self.workspace.cleanup()
 
 
 class BackgroundJobs:
@@ -164,17 +165,6 @@ class BackgroundJobs:
             self._worker.close()
             self._worker = None
 
-    def _publish(self, completed: Completed, operation: Operation) -> None:
-        if operation is Operation.SCAN:
-            self.app.discard_plan()
-        if operation in {Operation.SCAN, Operation.REPLAN} and completed.snapshot is not None:
-            write_snapshot(self.app.snapshot_path, completed.snapshot)
-            self.app.snapshot = completed.snapshot
-        if operation in {Operation.SOLVE, Operation.REPLAN}:
-            if completed.plan is None:
-                raise RuntimeError("completed planning job has no plan")
-            self.app.save_plan(completed.plan)
-
     def _poll(self) -> None:
         job, worker = self._job, self._worker
         if job is None or job.status is not JobStatus.RUNNING:
@@ -188,14 +178,12 @@ class BackgroundJobs:
                     job.progress = message.message
                     continue
                 if isinstance(message, Completed):
-                    self._publish(message, job.operation)
-                    job.status, job.progress, job.result = (
-                        JobStatus.COMPLETED,
-                        "Complete",
-                        message.payload,
+                    payload = self.app.publish(
+                        message.result, expected_revision=message.expected_revision
                     )
+                    job.outcome, job.progress = PublishedResult(payload), "Complete"
                 elif isinstance(message, Failed):
-                    job.status, job.error = JobStatus.FAILED, message.message
+                    job.outcome = message
                 else:
                     raise RuntimeError("background worker returned an unknown message")
                 self._cleanup()
@@ -206,10 +194,10 @@ class BackgroundJobs:
                     return
                 raise RuntimeError("background worker exited without a result")
         except (EOFError, OSError, RuntimeError, ValueError) as error:
-            job.status, job.error = JobStatus.FAILED, str(error) or "background worker disconnected"
+            job.outcome = Failed(str(error) or "background worker disconnected")
             self._cleanup()
 
-    def status(self, job_id: str | None = None) -> dict[str, Any] | None:
+    def status(self, job_id: str | None = None) -> JobPayload | None:
         self._poll()
         if job_id is not None and (self._job is None or self._job.id != job_id):
             raise ValueError("unknown background job")
@@ -220,7 +208,7 @@ class BackgroundJobs:
         self._poll()
         return self._job is not None and self._job.status is JobStatus.RUNNING
 
-    def start(self, operation: str, body: dict[str, object]) -> dict[str, Any]:
+    def start(self, operation: str, body: dict[str, object]) -> JobPayload:
         if self.running:
             raise ValueError("a background job is already running")
         try:
@@ -229,7 +217,7 @@ class BackgroundJobs:
             raise ValueError("unknown background operation") from error
         if self.app.trip is not None and requested is not Operation.REPLAN:
             raise ValueError("an execution session already exists; use Replan")
-        workspace = tempfile.TemporaryDirectory(prefix="eve-courier-job-")
+        self.app.require_revision(body)
         context = multiprocessing.get_context("spawn")
         receiving, sending = context.Pipe(duplex=False)
         inputs = JobInputs(
@@ -237,13 +225,14 @@ class BackgroundJobs:
             self.app.esi,
             self.app.zkill,
             self.app.clock,
-            self.app.snapshot,
+            self.app.observation,
             self.app.trip,
+            self.app.revision,
         )
         process = context.Process(
-            target=_run_job, args=(inputs, requested, body, workspace.name, sending), daemon=True
+            target=_run_job, args=(inputs, requested, body, sending), daemon=True
         )
-        self._worker = _Worker(process, receiving, workspace, time.monotonic())
+        self._worker = _Worker(process, receiving, time.monotonic())
         self._job = Job(uuid4().hex, requested)
         try:
             process.start()
@@ -255,13 +244,13 @@ class BackgroundJobs:
             sending.close()
         return self._job.to_dict()
 
-    def cancel(self, job_id: str) -> dict[str, Any]:
+    def cancel(self, job_id: str) -> JobPayload:
         self.status(job_id)
         assert self._job is not None
         if self._job.status is JobStatus.RUNNING:
             assert self._worker is not None
             self._worker.process.terminate()
-            self._job.status, self._job.progress = JobStatus.CANCELLED, "Cancelled"
+            self._job.outcome, self._job.progress = JobStatus.CANCELLED, "Cancelled"
             self._cleanup()
         return self._job.to_dict()
 
@@ -269,5 +258,5 @@ class BackgroundJobs:
         if self._worker is not None and self._worker.process.is_alive():
             self._worker.process.terminate()
         if self._job is not None and self._job.status is JobStatus.RUNNING:
-            self._job.status, self._job.progress = JobStatus.CANCELLED, "Server closed"
+            self._job.outcome, self._job.progress = JobStatus.CANCELLED, "Server closed"
         self._cleanup()

@@ -22,7 +22,7 @@ from eve_courier_optimizer.eve.http import HttpResponse
 from eve_courier_optimizer.eve.snapshot_file import write_snapshot
 from eve_courier_optimizer.optimization import SolverConfig
 from eve_courier_optimizer.routing.universe import UniverseGraph
-from tests.conftest import make_contract, make_snapshot
+from tests.support.scenarios import make_contract, make_snapshot
 
 
 class EmptyTransport:

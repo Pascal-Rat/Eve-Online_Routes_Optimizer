@@ -1,0 +1,7 @@
+{
+  "name": "eve-courier-browser-checks",
+  "private": true,
+  "type": "module",
+  "scripts": { "check": "tsc -p jsconfig.json", "test": "node --test --test-isolation=none browser_unit_tests/*.test.js" },
+  "devDependencies": { "typescript": "5.9.3" }
+}

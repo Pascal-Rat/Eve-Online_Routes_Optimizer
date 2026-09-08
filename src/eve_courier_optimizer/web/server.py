@@ -5,24 +5,30 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import socket
 import sys
+import threading
 import webbrowser
+from collections.abc import Callable
+from contextlib import suppress
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 from urllib.parse import parse_qs, urlsplit
 
 from eve_courier_optimizer import __version__
+from eve_courier_optimizer.application.file_lock import WorkspaceConflict
 from eve_courier_optimizer.eve.esi import EsiClient, EsiError
 from eve_courier_optimizer.eve.http import ResponseCache
 from eve_courier_optimizer.eve.zkill import ZkillClient, ZkillError
 from eve_courier_optimizer.routing.universe import UniverseGraph
 from eve_courier_optimizer.web.background_jobs import BackgroundJobs
+from eve_courier_optimizer.web.contracts import MutationResponse
 from eve_courier_optimizer.web.workspace import PlanningWorkspace, default_workspace_path
 
-JsonObject = dict[str, Any]
+JsonObject = dict[str, object]
 _LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost"})
 _DOWNLOAD_FILES = frozenset({"snapshot.json", "plan.json", "execution.json"})
 _MAX_REQUEST_BYTES = 1_048_576
@@ -34,6 +40,8 @@ def asset(name: str) -> tuple[bytes, str]:
         "styles.css",
         "app.js",
         "api.js",
+        "contract_schemas.js",
+        "contract_validation.js",
         "display.js",
         "autocomplete.js",
         "planner_form.js",
@@ -48,9 +56,31 @@ def asset(name: str) -> tuple[bytes, str]:
 def _handler_type(
     app: PlanningWorkspace,
     jobs: BackgroundJobs,
+    state_lock: threading.RLock,
 ) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = f"EveCourierLocal/{__version__}"
+
+        def setup(self) -> None:
+            super().setup()
+            self.connection.settimeout(5)
+            self._read_deadline = threading.Timer(10, self._expire_read)
+            self._read_deadline.daemon = True
+            self._read_deadline.start()
+
+        def _expire_read(self) -> None:
+            # A peer may have closed before the read deadline fired.
+            with suppress(OSError):
+                self.connection.shutdown(socket.SHUT_RDWR)
+
+        def handle(self) -> None:
+            with suppress(BrokenPipeError, ConnectionResetError):
+                super().handle()
+
+        def finish(self) -> None:
+            self._read_deadline.cancel()
+            with suppress(BrokenPipeError, ConnectionResetError):
+                super().finish()
 
         def log_message(self, format: str, *args: object) -> None:
             print(f"web: {format % args}", file=sys.stderr)
@@ -77,7 +107,7 @@ def _handler_type(
                 "connect-src 'self'; img-src 'self' data:; frame-ancestors 'self'",
             )
 
-        def _send_json(self, payload: JsonObject, status: HTTPStatus = HTTPStatus.OK) -> None:
+        def _send_json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
             encoded = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -108,11 +138,11 @@ def _handler_type(
             if filename not in _DOWNLOAD_FILES:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            path = app.workspace / filename
-            if not path.exists():
+            payload = app.artifact(filename)
+            if payload is None:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            data = path.read_bytes()
+            data = json.dumps(payload, indent=2, allow_nan=False).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
@@ -122,6 +152,17 @@ def _handler_type(
             self.wfile.write(data)
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+            self._read_deadline.cancel()
+            try:
+                with state_lock:
+                    self._get()
+            except WorkspaceConflict as error:
+                self._send_error_json(HTTPStatus.CONFLICT, str(error))
+            except (ValueError, OSError, RuntimeError) as error:
+                logging.getLogger(__name__).exception("Local read failed: %s", self.path)
+                self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
+
+        def _get(self) -> None:
             if not self._local_request_allowed():
                 self._send_error_json(HTTPStatus.FORBIDDEN, "local requests only")
                 return
@@ -166,49 +207,13 @@ def _handler_type(
                 return
             try:
                 body = self._body()
-                if self.path == "/api/jobs":
-                    job_body = body.get("input")
-                    if not isinstance(job_body, dict):
-                        raise ValueError("job input must be an object")
-                    self._send_json(
-                        {
-                            "job": jobs.start(
-                                str(body.get("operation", "")), cast(dict[str, object], job_body)
-                            )
-                        },
-                        HTTPStatus.ACCEPTED,
-                    )
-                    return
-                if self.path.startswith("/api/jobs/") and self.path.endswith("/cancel"):
-                    job_id = self.path.removeprefix("/api/jobs/").removesuffix("/cancel")
-                    self._send_json({"job": jobs.cancel(job_id)})
-                    return
-                if jobs.running:
-                    self._send_error_json(
-                        HTTPStatus.CONFLICT,
-                        "wait for the background job or cancel it first",
-                    )
-                    return
-                routes = {
-                    "/api/scan": app.scan,
-                    "/api/rank": app.rank,
-                    "/api/solve": app.solve,
-                    "/api/execution/start": app.start_execution,
-                    "/api/action": app.record_action,
-                    "/api/replan": app.replan,
-                    "/api/execution/extend": app.extend_horizon,
-                }
-                if self.path == "/api/execution/reset":
-                    payload = app.reset_execution()
-                else:
-                    action = routes.get(self.path)
-                    if action is None:
-                        self._send_error_json(HTTPStatus.NOT_FOUND, "unknown API route")
-                        return
-                    payload = action(body)
-                self._send_json(payload)
+                self._read_deadline.cancel()
+                with state_lock:
+                    self._post(body)
             except json.JSONDecodeError:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, "request body is not valid JSON")
+            except WorkspaceConflict as error:
+                self._send_error_json(HTTPStatus.CONFLICT, str(error))
             except ValueError as error:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, str(error))
             except (EsiError, ZkillError) as error:
@@ -217,16 +222,85 @@ def _handler_type(
                 logging.getLogger(__name__).exception("Local operation failed: %s", self.path)
                 self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(error))
 
+        def _post(self, body: JsonObject) -> None:
+            if self.path == "/api/jobs":
+                job_body = body.get("input")
+                if not isinstance(job_body, dict):
+                    raise ValueError("job input must be an object")
+                self._send_json(
+                    {
+                        "job": jobs.start(
+                            str(body.get("operation", "")), cast(dict[str, object], job_body)
+                        )
+                    },
+                    HTTPStatus.ACCEPTED,
+                )
+                return
+            if self.path.startswith("/api/jobs/") and self.path.endswith("/cancel"):
+                job_id = self.path.removeprefix("/api/jobs/").removesuffix("/cancel")
+                self._send_json({"job": jobs.cancel(job_id)})
+                return
+            if jobs.running:
+                self._send_error_json(
+                    HTTPStatus.CONFLICT,
+                    "wait for the background job or cancel it first",
+                )
+                return
+            routes: dict[str, Callable[[JsonObject], MutationResponse]] = {
+                "/api/scan": app.scan,
+                "/api/rank": app.rank,
+                "/api/solve": app.solve,
+                "/api/execution/start": app.start_execution,
+                "/api/action": app.record_action,
+                "/api/replan": app.replan,
+                "/api/execution/extend": app.extend_horizon,
+            }
+            payload: MutationResponse
+            if self.path == "/api/execution/reset":
+                payload = app.reset_execution(body)
+            else:
+                action = routes.get(self.path)
+                if action is None:
+                    self._send_error_json(HTTPStatus.NOT_FOUND, "unknown API route")
+                    return
+                payload = action(body)
+            self._send_json(payload)
+
     return Handler
 
 
-class LocalHTTPServer(HTTPServer):
+class LocalHTTPServer(ThreadingHTTPServer):
     def __init__(self, app: PlanningWorkspace, port: int) -> None:
         self.jobs = BackgroundJobs(app)
-        super().__init__(("127.0.0.1", port), _handler_type(app, self.jobs))
+        self.state_lock = threading.RLock()
+        self._connections = threading.BoundedSemaphore(16)
+        super().__init__(("127.0.0.1", port), _handler_type(app, self.jobs, self.state_lock))
+
+    def process_request(
+        self, request: socket.socket | tuple[bytes, socket.socket], client_address: tuple[str, int]
+    ) -> None:
+        if not isinstance(request, socket.socket):
+            raise TypeError("local HTTP server requires a TCP socket")
+        if not self._connections.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._connections.release()
+            raise
+
+    def process_request_thread(
+        self, request: socket.socket | tuple[bytes, socket.socket], client_address: tuple[str, int]
+    ) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._connections.release()
 
     def server_close(self) -> None:
-        self.jobs.close()
+        with self.state_lock:
+            self.jobs.close()
         super().server_close()
 
 

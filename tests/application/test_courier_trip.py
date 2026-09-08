@@ -13,30 +13,16 @@ from eve_courier_optimizer.domain import (
     CollateralMode,
     GateEvidence,
     GateThreatEvent,
-    PlanningConstraints,
     SecurityBand,
     SecurityPolicy,
     SystemKillActivity,
     ThreatCategory,
-    TravelTimeModel,
 )
 from eve_courier_optimizer.optimization import RouteOptimizer, SolverConfig
 from eve_courier_optimizer.routing.route_problem import RouteProblem
 from eve_courier_optimizer.routing.universe import UniverseGraph
-from tests.conftest import make_contract, make_snapshot
-
-
-def constraints(now: datetime, mode: CollateralMode) -> PlanningConstraints:
-    return PlanningConstraints(
-        start_system_id=1,
-        cargo_capacity_units=20,
-        collateral_budget_units=200,
-        horizon_seconds=3_600,
-        snapshot_time=now,
-        collateral_mode=mode,
-        travel=TravelTimeModel(10, 1),
-        security=SecurityPolicy(0.45),
-    )
+from tests.support.scenarios import make_contract, make_snapshot
+from tests.support.scenarios import trip_constraints as constraints
 
 
 def test_locked_plan_becomes_mandatory_commitment_and_can_advance(

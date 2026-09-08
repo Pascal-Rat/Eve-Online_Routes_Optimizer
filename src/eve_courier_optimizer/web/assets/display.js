@@ -1,6 +1,40 @@
-export const $ = (selector) => document.querySelector(selector);
-export const $$ = (selector) => [...document.querySelectorAll(selector)];
+/**
+ * @template {keyof import('./dom_types').ElementIds} K
+ * @overload
+ * @param {K} selector
+ * @returns {import('./dom_types').ElementIds[K]}
+ */
+/** @overload @param {string} selector @returns {HTMLElement} */
+/** @param {string} selector @returns {HTMLElement} */
+export function $(selector) {
+  const element = document.querySelector(selector);
+  if (!(element instanceof HTMLElement)) throw new Error(`Missing UI element: ${selector}`);
+  return element;
+}
+/** @param {string} selector @returns {HTMLElement[]} */
+export function $$(selector) {
+  return [...document.querySelectorAll(selector)].map((element) => {
+    if (!(element instanceof HTMLElement)) throw new Error(`Invalid UI element: ${selector}`);
+    return element;
+  });
+}
+/** @param {string} selector @returns {HTMLInputElement[]} */
+export function inputs(selector) {
+  return $$(selector).map((element) => {
+    if (!(element instanceof HTMLInputElement)) throw new Error(`Invalid input: ${selector}`);
+    return element;
+  });
+}
+/** @param {string} selector @returns {HTMLInputElement | HTMLSelectElement} */
+export function field(selector) {
+  const element = $(selector);
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLSelectElement)) {
+    throw new Error(`Invalid form field: ${selector}`);
+  }
+  return element;
+}
 
+/** @param {unknown} value @param {number} [digits] */
 export function fmtNumber(value, digits = 0) {
   if (value === null || value === undefined || value === "") return "--";
   const number = Number(value);
@@ -8,6 +42,7 @@ export function fmtNumber(value, digits = 0) {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: digits }).format(number);
 }
 
+/** @param {unknown} value @param {boolean} [compact] */
 export function fmtISK(value, compact = true) {
   if (value === null || value === undefined) return "--";
   const n = Number(value);
@@ -21,6 +56,7 @@ export function fmtISK(value, compact = true) {
   return `${fmtNumber(n, 2)} ISK`;
 }
 
+/** @param {number | null | undefined} seconds */
 export function fmtDuration(seconds) {
   if (seconds === null || seconds === undefined) return "--";
   const total = Math.max(0, Number(seconds));
@@ -32,16 +68,18 @@ export function fmtDuration(seconds) {
   return `${secs}s`;
 }
 
+/** @param {string} kind @param {string} title @param {string} detail */
 export function showNotice(kind, title, detail) {
   const notice = $("#notice");
   notice.className = `notice ${kind}`;
-  notice.querySelector(".notice-icon").textContent = kind === "error" ? "!" : kind === "success" ? "✓" : kind === "warning" ? "!" : "i";
-  notice.querySelector("div").replaceChildren();
+  $("#notice .notice-icon").textContent = kind === "error" ? "!" : kind === "success" ? "✓" : kind === "warning" ? "!" : "i";
+  $("#notice div").replaceChildren();
   const strong = document.createElement("strong");
   strong.textContent = `${title} `;
-  notice.querySelector("div").append(strong, document.createTextNode(detail));
+  $("#notice div").append(strong, document.createTextNode(detail));
 }
 
+/** @param {string} text @param {string} [className] */
 export function makeCell(text, className = "") {
   const td = document.createElement("td");
   td.textContent = text;

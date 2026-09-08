@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src/eve_courier_optimizer/web/assets/*.js", "src/eve_courier_optimizer/web/assets/*.d.ts"]
+}

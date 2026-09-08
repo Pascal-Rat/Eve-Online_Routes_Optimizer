@@ -19,3 +19,6 @@ plan*.json
 execution*.json
 replan*.json
 *.sqlite3-journal
+
+# JavaScript development tools
+node_modules/

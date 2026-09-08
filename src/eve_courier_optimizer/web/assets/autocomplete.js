@@ -1,9 +1,14 @@
 import { api } from "./api.js";
 
+/** @typedef {import('./contracts').Suggestion} Suggestion */
+/** @param {{input: HTMLInputElement, menu: HTMLElement, endpoint: string, minChars: number,
+ * onSelect: (item: Suggestion) => void, onInput?: (() => void) | null}} options */
 export function wireAutocomplete({ input, menu, endpoint, minChars, onSelect, onInput = null }) {
-  let timer = null;
+  let timer = 0;
+  /** @type {Suggestion[]} */
   let items = [];
   let generation = 0;
+  /** @type {AbortController | null} */
   let request = null;
   let activeIndex = -1;
 
@@ -17,6 +22,7 @@ export function wireAutocomplete({ input, menu, endpoint, minChars, onSelect, on
     input.removeAttribute("aria-activedescendant");
   }
 
+  /** @param {number} index */
   function setActive(index) {
     const options = [...menu.querySelectorAll(".suggestion-option")];
     if (!options.length) return;
@@ -29,6 +35,7 @@ export function wireAutocomplete({ input, menu, endpoint, minChars, onSelect, on
     options[activeIndex].scrollIntoView({ block: "nearest" });
   }
 
+  /** @param {Suggestion} item */
   function choose(item) {
     onSelect(item);
     close();
@@ -62,6 +69,7 @@ export function wireAutocomplete({ input, menu, endpoint, minChars, onSelect, on
     }
   }
 
+  /** @param {number} version */
   async function query(version) {
     const value = input.value.trim();
     if (document.activeElement !== input || input.disabled || value.length < minChars) {
@@ -70,13 +78,13 @@ export function wireAutocomplete({ input, menu, endpoint, minChars, onSelect, on
     }
     request = new AbortController();
     try {
-      const result = await api(`${endpoint}?q=${encodeURIComponent(value)}`, { signal: request.signal });
+      const result = await api(`${endpoint}?q=${encodeURIComponent(value)}`, "Suggestions", { signal: request.signal });
       if (version !== generation || document.activeElement !== input || input.disabled) return;
       items = result.items;
       activeIndex = -1;
       renderOptions();
     } catch (error) {
-      if (version === generation && error.name !== "AbortError") close();
+      if (version === generation && (!(error instanceof Error) || error.name !== "AbortError")) close();
     }
   }
 

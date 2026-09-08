@@ -1,20 +1,45 @@
-import { $, $$, fmtNumber, fmtISK, fmtDuration, showNotice } from "./display.js";
-import { api } from "./api.js";
+import { $, fmtNumber, fmtISK, fmtDuration, showNotice } from "./display.js";
+import { api, ApiError } from "./api.js";
+import { decode } from "./contract_validation.js";
 import { PlanningForm } from "./planner_form.js";
 import { renderProof, renderRoute, renderCommitments, renderRank } from "./route_view.js";
 
+/** @typedef {import('./contracts').PlanPayload} Plan */
+/** @typedef {import('./contracts').ExecutionPayload} Execution */
+/** @typedef {import('./contracts').SnapshotSummary} Snapshot */
+/** @typedef {import('./contracts').RunningJob | import('./contracts').CompletedJob | import('./contracts').FailedJob | import('./contracts').CancelledJob} Job */
+/** @typedef {import('./contracts').ScanResponse | import('./contracts').PlanResponse | import('./contracts').RankResponse} OperationResult */
+/** @typedef {{revision: number, proposal_id: string | null}} Identity */
+/** @type {{snapshot: Snapshot | null, plan: Plan | null, execution: Execution | null,
+ * busy: boolean, revision: number | null, proposalId: string | null,
+ * readonly canArm: boolean, readonly pendingArm: boolean, jobId: string | null}} */
 const state = {
   snapshot: null,
   plan: null,
   execution: null,
   busy: false,
-  pendingArm: false,
-  canArm: false,
+  revision: null,
+  proposalId: null,
+  get canArm() { return Boolean(this.proposalId && this.plan?.certificate?.feasibility_verified); },
+  get pendingArm() { return this.canArm && Boolean(this.execution); },
   jobId: null,
 };
 
 const form = new PlanningForm();
 
+/** @param {Identity} payload */
+function rememberRevision(payload) {
+  if (!Number.isSafeInteger(payload.revision)) throw new Error("The server returned an invalid workspace revision.");
+  state.revision = payload.revision;
+  state.proposalId = payload.proposal_id ?? null;
+}
+
+/** @param {string} path @param {object} body */
+function mutate(path, body) {
+  return api(path, "ExecutionResponse", { body: { ...body, expected_revision: state.revision } });
+}
+
+/** @param {Job} job @returns {Promise<OperationResult | null>} */
 async function waitForJob(job) {
   state.jobId = job.id;
   $("#cancel-job").classList.remove("hidden");
@@ -23,7 +48,7 @@ async function waitForJob(job) {
     while (job.status === "running") {
       $("#busy-detail").textContent = job.progress;
       await new Promise((resolve) => window.setTimeout(resolve, 300));
-      job = (await api(`/api/jobs/${job.id}`)).job;
+      job = (await api(`/api/jobs/${job.id}`, "JobEnvelope")).job;
     }
     if (job.status === "failed") throw new Error(job.error || "Background operation failed.");
     if (job.status === "cancelled") {
@@ -37,22 +62,27 @@ async function waitForJob(job) {
   }
 }
 
-async function runJob(operation, body) {
-  const response = await api("/api/jobs", { body: { operation, input: body } });
-  return waitForJob(response.job);
+/** @template {"ScanResponse" | "RankResponse" | "PlanResponse"} K
+ * @param {"scan" | "rank" | "solve" | "replan"} operation @param {object} body @param {K} contract
+ * @returns {Promise<import('./contracts').ContractTypes[K] | null>} */
+async function runJob(operation, body, contract) {
+  const response = await api("/api/jobs", "JobEnvelope", { body: { operation, input: { ...body, expected_revision: state.revision } } });
+  const result = await waitForJob(response.job);
+  return result === null ? null : decode(result, contract);
 }
 
 async function cancelJob() {
   if (!state.jobId) return;
   $("#cancel-job").disabled = true;
   try {
-    await api(`/api/jobs/${state.jobId}/cancel`, { body: {} });
+    await api(`/api/jobs/${state.jobId}/cancel`, "JobEnvelope", { body: {} });
   } catch (error) {
     $("#cancel-job").disabled = false;
-    $("#busy-detail").textContent = error.message;
+    $("#busy-detail").textContent = error instanceof Error ? error.message : String(error);
   }
 }
 
+/** @param {boolean} active @param {string} [title] @param {string} [detail] */
 function setBusy(active, title = "Working…", detail = "") {
   state.busy = active;
   $("#busy-title").textContent = title;
@@ -62,6 +92,8 @@ function setBusy(active, title = "Working…", detail = "") {
   updateButtons();
 }
 
+/** @template {Identity} T @param {string} title @param {string} detail
+ * @param {() => Promise<T | null>} action @returns {Promise<T | null | undefined>} */
 async function withBusy(title, detail, action) {
   if (state.busy) return;
   setBusy(true, title, detail);
@@ -73,7 +105,9 @@ async function withBusy(title, detail, action) {
   elapsed();
   const timer = setInterval(elapsed, 1000);
   try {
-    return await action();
+    const result = await action();
+    if (result && Object.hasOwn(result, "revision")) rememberRevision(result);
+    return result;
   } catch (error) {
     showNotice("error", "Action failed.", error instanceof Error ? error.message : String(error));
     return null;
@@ -84,6 +118,7 @@ async function withBusy(title, detail, action) {
   }
 }
 
+/** @param {string} stage */
 function setWorkflow(stage) {
   const order = ["scan", "rank", "solve", "run"];
   const current = order.indexOf(stage);
@@ -115,6 +150,7 @@ function updateButtons() {
   $("#download-plan").classList.toggle("disabled", !state.plan);
 }
 
+/** @param {Snapshot | null} snapshot */
 function renderSnapshot(snapshot) {
   state.snapshot = snapshot;
   form.snapshot = snapshot;
@@ -148,6 +184,7 @@ function updateSnapshotAge() {
   $("#snapshot-pill").textContent = `${fmtNumber(state.snapshot.contracts)} couriers · ${fmtDuration(ageSeconds)} old`;
 }
 
+/** @param {Plan | null} plan */
 function renderPlan(plan) {
   state.plan = plan;
   renderProof(plan);
@@ -173,6 +210,7 @@ function renderPlan(plan) {
   updateButtons();
 }
 
+/** @param {Execution | null} execution */
 function renderExecutionLock(execution) {
   const banner = $("#execution-lock-banner");
   const topPill = $("#execution-top-pill");
@@ -211,15 +249,14 @@ function renderExecutionLock(execution) {
 
 async function extendHorizon() {
   const result = await withBusy("Extending planning horizon…", "Preserving every contract deadline.",
-    () => api("/api/execution/extend", { body: { minutes: $("#extend-minutes").value } }));
+    () => mutate("/api/execution/extend", { minutes: $("#extend-minutes").value }));
   if (!result) return;
-  state.pendingArm = false;
-  state.canArm = false;
   renderPlan(null);
   renderExecution(result.execution);
   showNotice("success", "Planning horizon extended.", "Accepted contracts and their deadlines are unchanged. Replan to compute a new route.");
 }
 
+/** @param {Execution | null} execution */
 function renderExecution(execution) {
   state.execution = execution;
   renderCommitments(execution);
@@ -244,14 +281,14 @@ function renderExecution(execution) {
       : execution.can_end_safely
         ? "No accepted commitments"
         : "Execution active";
-    $("#exec-system").textContent = execution.current_system_name || execution.current_system_id;
+    $("#exec-system").textContent = execution.current_system_name || String(execution.current_system_id);
     $("#exec-active").textContent = fmtNumber(execution.active_count);
     $("#exec-cargo").textContent = `${fmtNumber(execution.cargo_in_use_m3, 3)} m³`;
     $("#exec-collateral").textContent = fmtISK(execution.collateral_locked_isk);
     const guidance = $("#execution-guidance");
     const resetButton = $("#reset-execution");
     if (state.pendingArm) {
-      guidance.textContent = "This revised locked-mode plan is only a proposal until you apply it. Existing accepted commitments remain live and can still be recorded. If a proposed new contract is unavailable, refresh and replan again instead of arming it.";
+      guidance.textContent = "This revised route and avoidance policy are a proposal until you apply them. Existing accepted commitments remain live and can still be recorded. If a proposed new contract is unavailable, refresh and replan again instead of arming it.";
     } else if (execution.can_end_safely) {
       guidance.textContent = "No accepted courier commitments remain. You may keep following or replanning this trip, or end execution to unlock a completely new scan and plan.";
     } else {
@@ -267,44 +304,52 @@ function renderExecution(execution) {
     setWorkflow("run");
   }
   renderExecutionLock(execution);
+  $("#start-execution").textContent = state.execution ? "Apply revised plan to execution" : "Arm this plan for execution";
   const locked = (state.plan?.model?.collateral_mode || state.execution?.collateral_mode) === "locked";
   $("#locked-confirm-row").classList.toggle("hidden", !locked);
   renderRoute(state.plan, state.execution, state.pendingArm);
   updateButtons();
 }
 
+/** @returns {Promise<void>} */
 async function loadStatus() {
   try {
-    const payload = await api("/api/status");
-    if (payload.job?.status === "running") {
-      await withBusy("Resuming background operation…", payload.job.progress,
-        () => waitForJob(payload.job));
+    const payload = await api("/api/status", "StatusWithJob");
+    const runningJob = payload.job;
+    if (runningJob?.status === "running") {
+      await withBusy("Resuming background operation…", runningJob.progress,
+        () => waitForJob(runningJob));
       return loadStatus();
     }
-    state.canArm = Boolean(payload.plan_armable);
-    state.pendingArm = state.canArm && Boolean(payload.execution)
-      && payload.plan?.model?.collateral_mode === "locked"
-      && (payload.plan?.summary?.selected_contract_ids?.length || 0) > 0;
+    rememberRevision(payload);
+    if (!payload.sde || !Number.isSafeInteger(payload.sde.build_number)) {
+      throw new Error("The server returned an invalid workspace status.");
+    }
     $("#sde-pill").textContent = `SDE ${payload.sde.build_number} · ${fmtNumber(payload.sde.systems)} systems`;
     renderSnapshot(payload.snapshot);
     form.hydratePlannerFromPlan(payload.plan);
     renderPlan(payload.plan);
     renderExecution(payload.execution);
     if (payload.job?.operation === "rank" && payload.job.status === "completed") {
-      renderRank(payload.job.result);
+      renderRank(decode(payload.job.result, "RankResponse"));
     }
-    if (payload.execution) {
+    if (payload.warnings?.length) {
+      showNotice("warning", "Saved proposal needs attention.", payload.warnings.join(" "));
+    } else if (payload.execution) {
       showNotice("warning", "Live execution restored.", "This route survived the restart. Planning controls remain locked until you end the session; use the persistent banner above to resume it.");
     } else if (payload.snapshot) {
       showNotice("info", "Snapshot restored.", "You can inspect or solve it immediately, or scan again for a fresh market observation.");
     }
-  } catch {
-    showNotice(
-      "warning",
-      "Local backend not connected.",
-      "This interface is normally opened by `eve-courier web`. Start that command and refresh this page.",
-    );
-    $("#sde-pill").textContent = "Backend offline";
+  } catch (error) {
+    if (error instanceof ApiError && error.kind === "network") {
+      showNotice("warning", "Local backend not connected.", "Start `eve-courier web` and refresh this page.");
+      $("#sde-pill").textContent = "Backend offline";
+    } else {
+      const message = error instanceof Error ? error.message : String(error);
+      showNotice("error", error instanceof ApiError ? "Could not load the workspace." : "Could not display the workspace.", message);
+      $("#sde-pill").textContent = "Workspace unavailable";
+      console.error("Workspace restoration failed", error);
+    }
   }
 }
 
@@ -313,6 +358,7 @@ async function scan() {
     showNotice("error", "Region required.", "Search and add at least one region, or choose a region preset.");
     return;
   }
+  /** @type {Record<string, unknown>} */
   const body = form.regionScope === "selected"
     ? { region_scope: "selected", regions: form.selectedRegions.map((item) => item.id || item.name) }
     : { region_scope: form.regionScope };
@@ -338,10 +384,9 @@ async function scan() {
       : form.regionScope === "security"
         ? "Skipping SDE regions that contain no system in the selected security bands; mixed regions are retained."
         : "Using bounded ESI concurrency and cache/rate-limit handling; gate intel covers every region this configured route could traverse.",
-    () => runJob("scan", body),
+    () => runJob("scan", body, "ScanResponse"),
   );
-  if (!result) return;
-  state.canArm = false;
+  if (!result?.snapshot) return;
   renderSnapshot(result.snapshot);
   renderPlan(null);
   renderRank(null);
@@ -363,7 +408,7 @@ async function rank() {
   const result = await withBusy(
     "Ranking feasible opportunities…",
     "Applying endpoint, security, danger-policy, capacity, collateral, expiry and horizon filters.",
-    () => runJob("rank", form.plannerPayload()),
+    () => runJob("rank", form.plannerPayload(), "RankResponse"),
   );
   if (!result) return;
   renderRank(result);
@@ -381,11 +426,9 @@ async function solve() {
   const result = await withBusy(
     "Optimizing route & proving reward…",
     cap ? "Exact inside the retained candidate set. The certificate will mark the global scope as truncated." : "No candidate cap: the solver is working over every eligible contract retained by safe reductions.",
-    () => runJob("solve", form.plannerPayload()),
+    () => runJob("solve", form.plannerPayload(), "PlanResponse"),
   );
   if (!result) return;
-  state.pendingArm = false;
-  state.canArm = Boolean(result.plan.certificate.feasibility_verified);
   renderPlan(result.plan);
   renderExecution(null);
   const cert = result.plan.certificate;
@@ -407,26 +450,23 @@ async function startExecution() {
   const result = await withBusy(
     "Arming execution state…",
     "Persisting accepted commitments so replanning cannot silently drop them.",
-    () => api("/api/execution/start", { body: { confirm_locked_acceptance: locked && selected > 0 && $("#locked-confirm").checked } }),
+    () => mutate("/api/execution/start", { proposal_id: state.proposalId, confirm_locked_acceptance: locked && selected > 0 && $("#locked-confirm").checked }),
   );
   if (!result) return;
-  state.pendingArm = false;
-  state.canArm = false;
   renderExecution(result.execution);
   showNotice("success", "Execution session armed.", "Use the route-table buttons to record real pickups and deliveries.");
 }
 
+/** @param {string | undefined} action @param {string} contractId */
 async function recordAction(action, contractId) {
   if (!action || !contractId) return;
   const invalidatesReview = state.pendingArm;
   const result = await withBusy(
     `Recording ${action}…`,
     `Contract #${contractId}; the transition is validated before persistent state is changed.`,
-    () => api("/api/action", { body: { action, contract_id: contractId, at: "now" } }),
+    () => mutate("/api/action", { action, contract_id: contractId, at: "now" }),
   );
   if (!result) return;
-  state.canArm = false;
-  if (invalidatesReview) state.pendingArm = false;
   renderExecution(result.execution);
   if (invalidatesReview) {
     showNotice(
@@ -439,16 +479,15 @@ async function recordAction(action, contractId) {
   }
 }
 
+/** @param {string} systemId @param {string | undefined} systemName */
 async function recordRouteSystem(systemId, systemName) {
   const invalidatesReview = state.pendingArm;
   const result = await withBusy(
     "Recording route progress…",
     `${systemName} is being marked as reached in the persisted execution state.`,
-    () => api("/api/action", { body: { action: "route_system", system_id: systemId, at: "now" } }),
+    () => mutate("/api/action", { action: "route_system", system_id: systemId, at: "now" }),
   );
   if (!result) return;
-  state.canArm = false;
-  if (invalidatesReview) state.pendingArm = false;
   renderExecution(result.execution);
   showNotice(
     invalidatesReview ? "warning" : "success",
@@ -463,19 +502,15 @@ async function replan() {
   const result = await withBusy(
     "Refreshing market & replanning…",
     "Accepted contracts remain mandatory; fresh public opportunities may be added around them.",
-    () => runJob("replan", { ...form.plannerPayload(), refresh: true }),
+    () => runJob("replan", { ...form.plannerPayload(), refresh: true }, "PlanResponse"),
   );
   if (!result) return;
-  state.canArm = Boolean(result.plan.certificate?.feasibility_verified);
-  state.pendingArm = state.canArm && result.execution?.collateral_mode === "locked"
-    && (result.plan.summary?.selected_contract_ids?.length || 0) > 0;
   renderSnapshot(result.snapshot);
   form.hydratePlannerFromPlan(result.plan);
   renderPlan(result.plan);
   renderExecution(result.execution);
   $("#locked-confirm").checked = false;
   if (result.plan.certificate?.status === "proven_infeasible") {
-    state.pendingArm = false;
     renderExecution(result.execution);
     if ((result.execution?.active_count || 0) > 0) {
       showNotice(
@@ -508,12 +543,11 @@ async function resetExecution() {
   if (!window.confirm(question)) return;
   const result = await withBusy(
     canEndSafely ? "Ending execution session…" : "Resetting execution session…",
-    "The snapshot and last plan remain available; the persisted live-state file is removed.",
-    () => api("/api/execution/reset", { body: {} }),
+    "The snapshot remains available for a new plan. The saved execution and proposal will be cleared.",
+    () => mutate("/api/execution/reset", {}),
   );
   if (!result) return;
-  state.pendingArm = false;
-  state.canArm = false;
+  renderPlan(null);
   renderExecution(null);
   $("#start-execution").textContent = "Arm this plan for execution";
   if (canEndSafely) {
@@ -538,8 +572,9 @@ function wireEvents() {
   $("#end-execution-banner").addEventListener("click", resetExecution);
   $("#collateral-mode").addEventListener("change", () => renderExecution(state.execution));
   document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
     const button = event.target.closest("button.row-action");
-    if (!button || button.disabled) return;
+    if (!(button instanceof HTMLButtonElement) || button.disabled) return;
     if (button.dataset.contractId) recordAction(button.dataset.action, button.dataset.contractId);
     else if (button.dataset.systemId) recordRouteSystem(button.dataset.systemId, button.dataset.systemName);
   });
