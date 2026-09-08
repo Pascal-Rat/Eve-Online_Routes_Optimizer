@@ -32,6 +32,46 @@ Commit benchmark inputs, runners and regression assertions. Results, solver dump
 are generated artifacts; `benchmarks/results/` is ignored by Git. Each `--output` appends one JSON
 record per observation, so use a fresh output path for each measurement campaign.
 
+## Threat-aware routing coverage
+
+Both gold runners enable threat avoidance. The tiny frozen universe has three synthetic
+gate-threat events; Empire retains 250 observed events across 24 covered regions. Empire
+stress variants inherit that observation and policy. Generated generalization cases currently
+vary route geometry and resources, without adding threat observations.
+
+Threat matches remove systems from the permitted transit graph before shortest paths and
+contract feasibility are computed. A permitted endpoint can therefore become unreachable,
+or its detour can exceed the horizon. Reward cannot compensate for a forbidden transit.
+
+`tests/optimization/test_threat_routing.py` exercises observation-to-policy conversion,
+preprocessing, optimization and every returned gate path. A very valuable contract has
+permitted endpoints but two camped entrances. The three cases require rejecting it when
+both entrances are blocked, using a longer permitted detour when it fits, and rejecting it
+when that detour exceeds the horizon. The unrestricted control selects the valuable contract;
+reusing its graph also checks that cached unrestricted distances cannot bypass the new policy.
+
+```bash
+python -m pytest tests/optimization/test_threat_routing.py --no-cov
+```
+
+An on/off comparison on 2026-09-08 used the **frozen 2026-08-06 observation**, the same profile
+constraints, ten-second budgets, four workers and solver seed 41. All four solves proved optimal:
+
+| Profile | Threat avoidance | Eligible contracts | Reward ISK | Flagged systems in returned route |
+| --- | --- | ---: | ---: | --- |
+| DST | Enabled | 96 | 58,000,000 | None |
+| DST | Disabled | 96 | 58,000,000 | Anttiri |
+| BR | Enabled | 48 | 25,651,527 | None |
+| BR | Disabled | 60 | 34,054,795 | Rancer, Kourmonen, Ahbazon |
+
+The enabled policy excluded 28 systems. These names describe historical benchmark routes,
+not current threat reports. Tied optimal routes can change; tests should assert compliance
+with the forbidden set, rather than require a particular unrestricted itinerary.
+
+Threat coverage verifies the recorded policy. It does not establish that an unobserved system
+has no ambush. Start/mandatory-endpoint exemptions, incomplete feeds and the observation window
+remain part of the [domain contract](DOMAIN.md#gate-threat-policy).
+
 ## Compare revisions
 
 Use the same interpreter and OR-Tools installation. Run revisions sequentially and alternate their
