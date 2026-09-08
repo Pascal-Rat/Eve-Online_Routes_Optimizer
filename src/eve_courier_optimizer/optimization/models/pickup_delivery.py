@@ -7,6 +7,8 @@ from typing import Final
 
 from ortools.sat.python import cp_model
 
+# OR-Tools 9.15 leaves the variadic only_enforce_if overload untyped. The narrow
+# ignores cover that signature; these calls use typed Boolean decision variables.
 from eve_courier_optimizer.domain import (
     ActionKind,
     CollateralMode,
@@ -513,10 +515,10 @@ class PickupDeliveryModel:
             )
             for node_id in contract_event_node_ids:
                 event = self.events[node_id]
-                self.model.add(
+                self.model.add(  # pyright: ignore[reportUnknownMemberType]
                     self.arrival[node_id] >= self.earliest_arrivals[event.node_id]
                 ).only_enforce_if(is_contract_selected)
-                self.model.add(
+                self.model.add(  # pyright: ignore[reportUnknownMemberType]
                     self.arrival[node_id] <= self.latest_arrivals[event.node_id]
                 ).only_enforce_if(is_contract_selected)
         for node_id in (
@@ -606,24 +608,24 @@ class PickupDeliveryModel:
                 if source_event.action_kind is not None
                 else 0
             )
-            self.model.add(
+            self.model.add(  # pyright: ignore[reportUnknownMemberType]
                 self.arrival[destination_node_id]
                 == self.arrival[source_node_id] + source_service_time_seconds + travel_time_seconds
             ).only_enforce_if(is_arc_used)
-            self.model.add(
+            self.model.add(  # pyright: ignore[reportUnknownMemberType]
                 self.order[destination_node_id] == self.order[source_node_id] + 1
             ).only_enforce_if(is_arc_used)
-            self.model.add(
+            self.model.add(  # pyright: ignore[reportUnknownMemberType]
                 self.cargo[destination_node_id]
                 == self.cargo[source_node_id] + destination_event.cargo_delta
             ).only_enforce_if(is_arc_used)
             if self.parcels is not None:
-                self.model.add(
+                self.model.add(  # pyright: ignore[reportUnknownMemberType]
                     self.parcels[destination_node_id]
                     == self.parcels[source_node_id] + destination_event.parcel_delta
                 ).only_enforce_if(is_arc_used)
             if self.collateral is not None:
-                self.model.add(
+                self.model.add(  # pyright: ignore[reportUnknownMemberType]
                     self.collateral[destination_node_id]
                     == self.collateral[source_node_id] + destination_event.collateral_delta
                 ).only_enforce_if(is_arc_used)
@@ -641,7 +643,7 @@ class PickupDeliveryModel:
             is_contract_selected = self.contract_is_selected[contract.contract_id]
             pickup_node_id = self.catalog.optional_pickups[contract.contract_id]
             delivery_node_id = self.catalog.optional_deliveries[contract.contract_id]
-            self.model.add(
+            self.model.add(  # pyright: ignore[reportUnknownMemberType]
                 self.order[delivery_node_id] >= self.order[pickup_node_id] + 1
             ).only_enforce_if(is_contract_selected)
             minimum_delivery_travel_seconds = self._travel_seconds(
@@ -651,23 +653,23 @@ class PickupDeliveryModel:
             assert minimum_delivery_travel_seconds is not None
             # Interleaving cannot beat the shortest path. This redundant inequality
             # strengthens propagation beyond the conditional arc constraints.
-            self.model.add(
+            self.model.add(  # pyright: ignore[reportUnknownMemberType]
                 self.arrival[delivery_node_id]
                 >= self.arrival[pickup_node_id]
                 + self.constraints.travel.service_seconds
                 + minimum_delivery_travel_seconds
             ).only_enforce_if(is_contract_selected)
             if self.constraints.collateral_mode is CollateralMode.LOCKED:
-                self.model.add(
+                self.model.add(  # pyright: ignore[reportUnknownMemberType]
                     self.arrival[delivery_node_id] + self.constraints.travel.service_seconds
                     <= contract.days_to_complete * 86_400
                 ).only_enforce_if(is_contract_selected)
             else:
                 latest_pickup_second = contract.last_pickup_second(self.constraints.snapshot_time)
-                self.model.add(
+                self.model.add(  # pyright: ignore[reportUnknownMemberType]
                     self.arrival[pickup_node_id] <= latest_pickup_second
                 ).only_enforce_if(is_contract_selected)
-                self.model.add(
+                self.model.add(  # pyright: ignore[reportUnknownMemberType]
                     self.arrival[delivery_node_id] + self.constraints.travel.service_seconds
                     <= self.arrival[pickup_node_id] + contract.days_to_complete * 86_400
                 ).only_enforce_if(is_contract_selected)

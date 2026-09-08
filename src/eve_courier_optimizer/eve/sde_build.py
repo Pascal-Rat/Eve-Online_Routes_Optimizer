@@ -48,7 +48,10 @@ def _get_bytes(url: str, timeout_seconds: float = 30.0) -> bytes:
 
 def fetch_latest_build() -> LatestBuild:
     payload = json.loads(_get_bytes(LATEST_BUILD_URL), parse_float=str)
-    if not isinstance(payload, Mapping) or payload.get("_key") != "sde":
+    if not isinstance(payload, Mapping):
+        raise ValueError("unexpected CCP latest-build payload")
+    payload = cast(Mapping[str, Any], payload)
+    if payload.get("_key") != "sde":
         raise ValueError("unexpected CCP latest-build payload")
     return LatestBuild(
         build_number=int(payload["buildNumber"]),
@@ -93,8 +96,10 @@ def _jsonl(zip_file: ZipFile, member: str) -> Iterator[dict[str, Any]]:
 
 def _english_name(record: Mapping[str, Any]) -> str:
     name = record.get("name")
-    if isinstance(name, Mapping) and isinstance(name.get("en"), str):
-        return str(name["en"])
+    if isinstance(name, Mapping):
+        english = cast(Mapping[str, object], name).get("en")
+        if isinstance(english, str):
+            return english
     return ""
 
 
@@ -229,6 +234,7 @@ def build_route_database(
                 position = record.get("position")
                 if not isinstance(position, Mapping):
                     raise ValueError("stargate position must be an object")
+                position = cast(Mapping[str, Any], position)
                 gate_rows.append(
                     (
                         int(record["_key"]),
@@ -241,7 +247,7 @@ def build_route_database(
                 destination_raw = record["destination"]
                 if not isinstance(destination_raw, Mapping):
                     raise ValueError("stargate destination must be an object")
-                destination = int(destination_raw["solarSystemID"])
+                destination = int(cast(Mapping[str, Any], destination_raw)["solarSystemID"])
                 # CCP documents normal stargate connections as bidirectional. Inserting both
                 # directions also makes the route DB robust to one-sided source records.
                 jump_pairs.add((source, destination))

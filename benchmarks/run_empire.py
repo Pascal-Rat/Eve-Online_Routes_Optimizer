@@ -108,7 +108,7 @@ def _jita_system_id(graph: UniverseGraph) -> int:
     return matches[0]
 
 
-def _constraints(
+def benchmark_constraints(
     graph: UniverseGraph,
     snapshot: ContractSnapshot,
     profile: EmpireProfile,
@@ -157,7 +157,9 @@ def run_empire_profile(
 
     graph = load_empire_graph()
     snapshot = read_snapshot(FIXTURE)
-    problem = RouteProblem.from_snapshot(snapshot, graph, _constraints(graph, snapshot, profile))
+    problem = RouteProblem.from_snapshot(
+        snapshot, graph, benchmark_constraints(graph, snapshot, profile)
+    )
     eligible = problem.scope.eligible_contracts
     if eligible != profile.expected_eligible:
         raise RuntimeError(

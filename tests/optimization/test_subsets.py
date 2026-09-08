@@ -122,8 +122,8 @@ def test_subset_limits_never_convert_an_incumbent_into_a_ceiling(
     p = RouteProblem.from_snapshot(
         make_snapshot(now, make_contract(now, 1, 101, 103)), tiny_graph, constraints(now)
     )
-    for kwargs in ({"max_states": 1}, {"max_time_seconds": 1e-12}):
-        answer = solve_subset(p, **({"max_time_seconds": 2} | kwargs))
+    for max_states, max_time_seconds in ((1, 2.0), (250_000, 1e-12)):
+        answer = solve_subset(p, max_states=max_states, max_time_seconds=max_time_seconds)
         assert answer is not None and not answer.complete
         assert answer.objective_units == 0 and answer.upper_bound_units is None
         assert simulate_and_verify(

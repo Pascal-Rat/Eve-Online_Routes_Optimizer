@@ -146,7 +146,8 @@ def solve_exhaustively(
                 picked_contracts_mask | contract_bit,
                 delivered_contracts_mask,
             )
-            if pickup_completion_seconds < earliest_arrival_by_state.get(next_state_key, 2**63 - 1):
+            previous_arrival = earliest_arrival_by_state.get(next_state_key)
+            if previous_arrival is None or pickup_completion_seconds < previous_arrival:
                 earliest_arrival_by_state[next_state_key] = pickup_completion_seconds
                 next_queue_order += 1
                 heapq.heappush(
@@ -183,9 +184,8 @@ def solve_exhaustively(
                 picked_contracts_mask,
                 delivered_contracts_mask | contract_bit,
             )
-            if delivery_completion_seconds < earliest_arrival_by_state.get(
-                next_state_key, 2**63 - 1
-            ):
+            previous_arrival = earliest_arrival_by_state.get(next_state_key)
+            if previous_arrival is None or delivery_completion_seconds < previous_arrival:
                 earliest_arrival_by_state[next_state_key] = delivery_completion_seconds
                 next_queue_order += 1
                 heapq.heappush(

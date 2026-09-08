@@ -4,6 +4,7 @@ import random
 from dataclasses import replace
 from datetime import datetime, timedelta
 from itertools import permutations
+from unittest.mock import Mock
 
 import pytest
 
@@ -14,6 +15,7 @@ from eve_courier_optimizer.domain import (
     PlannedAction,
     PlanningConstraints,
     ProofStatus,
+    PublicCourierContract,
     SecurityPolicy,
     TravelTimeModel,
 )
@@ -73,7 +75,7 @@ def test_system_relaxation_is_never_below_reference_optimum_on_random_cases(
     rng = random.Random(23)
     stations = (101, 102, 103)
     for case in range(40):
-        contracts = []
+        contracts: list[PublicCourierContract] = []
         for index in range(5):
             origin_index = rng.randrange(0, 2)
             destination_index = rng.randrange(origin_index + 1, 3)
@@ -169,7 +171,7 @@ def test_dense_exact_solve_records_and_uses_bound_strengthening(
     # Exercise the system-master certificate; compact batch certificates have separate coverage.
     monkeypatch.setattr(
         "eve_courier_optimizer.optimization.search.haul_batches.solve_batches",
-        lambda *args, **kwargs: None,
+        Mock(return_value=None),
     )
     contracts = tuple(
         make_contract(now, contract_id, 101, 103, volume=1, collateral=1, reward=100)
@@ -207,9 +209,10 @@ def test_dense_exact_solve_records_and_uses_bound_strengthening(
 
 def test_lifted_transform_preserves_every_small_integer_packing() -> None:
     # Dynamic programming enumerates all multisets fitting each capacity, including exact fits.
+    # Check the private transform directly against an independent packing enumeration.
     for capacity in range(2, 21):
         for threshold in range(1, capacity // 2 + 1):
-            spec = bounds._LiftedResourceWorkSpec(capacity, "volume", threshold)
+            spec = bounds._LiftedResourceWorkSpec(capacity, "volume", threshold)  # pyright: ignore[reportPrivateUsage]
             best = [0] * (capacity + 1)
             for load in range(1, capacity + 1):
                 best[load] = max(best[load - w] + spec.demand(w) for w in range(1, load + 1))
@@ -235,14 +238,19 @@ def test_lifted_work_tightens_mixed_load_bound(
     # Isolate the packing transform; integer crossing bounds independently close this gap.
     monkeypatch.setattr(
         "eve_courier_optimizer.optimization.models.system_tour.add_resource_crossing_bounds",
-        lambda *args: (),
+        Mock(return_value=()),
     )
-    specs = bounds._resource_work_specs
+    # White-box comparison deliberately disables one internal mathematical strengthening.
+    specs = bounds._resource_work_specs  # pyright: ignore[reportPrivateUsage]
+
+    def without_lifting(p: RouteProblem) -> list[bounds._ResourceWorkSpec]:  # pyright: ignore[reportPrivateUsage]
+        return [s for s in specs(p) if not isinstance(s, bounds._LiftedResourceWorkSpec)]  # pyright: ignore[reportPrivateUsage]
+
     with monkeypatch.context() as patch:
         patch.setattr(
             bounds,
             "_resource_work_specs",
-            lambda p: [s for s in specs(p) if not isinstance(s, bounds._LiftedResourceWorkSpec)],
+            without_lifting,
         )
         old = SystemTourModel(problem, selection_cuts=bounds.SelectionCuts((), ())).solve(
             max_time_seconds=2

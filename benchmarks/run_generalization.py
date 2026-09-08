@@ -77,7 +77,7 @@ def prepare_generated_case(seed: int) -> tuple[str, UniverseGraph, RouteProblem]
         metadata=SdeMetadata(1, now.isoformat(), "fixture://generalization-v1"),
     )
     ports = rng.sample(labels, rng.randint(4, min(8, size)))
-    items = []
+    items: list[PublicCourierContract] = []
     for i in range(24 + 8 * (index % 3)):
         origin, destination = rng.sample(ports, 2)
         items.append(

@@ -43,7 +43,7 @@ def objective_range(rows: list[dict[str, object]], field: str) -> str:
 
 
 def elapsed(rows: list[dict[str, object]]) -> float:
-    values = []
+    values: list[int | float] = []
     for row in rows:
         value = row["elapsed"]
         if isinstance(value, bool) or not isinstance(value, int | float):

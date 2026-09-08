@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Sized
 from dataclasses import replace
 from datetime import datetime, timedelta
+from typing import cast
+from unittest.mock import Mock
 
 import pytest
 from ortools.sat.python import cp_model
 
+# OR-Tools 9.15 omits repeated-proto property types; these reads only require len().
 from eve_courier_optimizer.domain import (
     ActiveShipment,
     CollateralMode,
@@ -103,7 +107,7 @@ def test_resource_work_preserves_rolling_and_active_shipments(
         with monkeypatch.context() as patch:
             patch.setattr(
                 "eve_courier_optimizer.optimization.models.pickup_delivery.add_resource_work_bounds",
-                lambda *args: 0,
+                Mock(return_value=0),
             )
             baseline = RouteOptimizer(problem, tiny_graph, config=config).solve()
         strengthened = RouteOptimizer(problem, tiny_graph, config=config).solve()
@@ -223,7 +227,7 @@ def test_complete_hints_are_feasible_with_waypoints_and_resources(
         simulation.total_reward_units,
     )
     for model in (route.model, master.model):
-        assert len(model.proto.solution_hint.vars) == len(model.proto.variables)
+        assert len(model.proto.solution_hint.vars) == len(cast(Sized, model.proto.variables))  # pyright: ignore[reportUnknownMemberType]
         solver = cp_model.CpSolver()
         solver.parameters.fix_variables_to_their_hinted_value = True
         assert solver.solve(model) == cp_model.OPTIMAL
@@ -304,7 +308,7 @@ def test_duration_search_cannot_replace_a_faster_verified_incumbent(
     )
     monkeypatch.setattr(
         "eve_courier_optimizer.optimization.search.fixed_contract_route.refine_selection",
-        lambda *args, **kwargs: refinement,
+        Mock(return_value=refinement),
     )
     result = RouteOptimizer(
         problem,
@@ -353,7 +357,7 @@ def test_feasible_master_selection_improves_master_without_false_proof(
         )
 
     monkeypatch.setattr(SystemTourModel, "solve", bounded_master)
-    monkeypatch.setattr(haul_batches, "solve_batches", lambda *args, **kwargs: None)
+    monkeypatch.setattr(haul_batches, "solve_batches", Mock(return_value=None))
     outcome = ContractSelectionSearch(
         problem, tiny_graph, SolverConfig(minimize_finish_time_after_proof=False)
     ).run()

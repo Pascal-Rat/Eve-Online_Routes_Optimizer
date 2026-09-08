@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 from dataclasses import replace
 from datetime import datetime, timedelta
+from unittest.mock import Mock
 
 import pytest
 
@@ -13,6 +14,7 @@ from eve_courier_optimizer.domain import (
     PlannedAction,
     PlanningConstraints,
     ProofStatus,
+    PublicCourierContract,
     RoutableContract,
     SecurityPolicy,
     TravelLegKind,
@@ -233,12 +235,12 @@ def test_decomposition_learns_higher_order_cargo_infeasibility(
 ) -> None:
     monkeypatch.setattr(
         "eve_courier_optimizer.optimization.search.haul_batches.solve_batches",
-        lambda *args, **kwargs: None,
+        Mock(return_value=None),
     )
     if not use_subset_search:
         monkeypatch.setattr(
             "eve_courier_optimizer.optimization.search.subset_search.solve_subset",
-            lambda *args, **kwargs: None,
+            Mock(return_value=None),
         )
     contracts = tuple(
         make_contract(
@@ -368,7 +370,7 @@ def test_cp_sat_matches_reference_on_random_small_instances(
     rng = random.Random(7)
     station_ids = [101, 102, 103]
     for case in range(8):
-        contracts = []
+        contracts: list[PublicCourierContract] = []
         for index in range(5):
             origin_index = rng.randrange(0, 2)
             destination_index = rng.randrange(origin_index + 1, 3)

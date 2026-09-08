@@ -171,7 +171,11 @@ def _handler_type(
                     if not isinstance(job_body, dict):
                         raise ValueError("job input must be an object")
                     self._send_json(
-                        {"job": jobs.start(str(body.get("operation", "")), job_body)},
+                        {
+                            "job": jobs.start(
+                                str(body.get("operation", "")), cast(dict[str, object], job_body)
+                            )
+                        },
                         HTTPStatus.ACCEPTED,
                     )
                     return

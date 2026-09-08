@@ -201,7 +201,11 @@ class ZkillClient:
             raise ZkillError("zKillboard response was not valid JSON") from error
         if not isinstance(payload, list):
             raise ZkillError("zKillboard region response was not a list")
-        return tuple(cast(dict[str, Any], row) for row in payload if isinstance(row, dict))
+        return tuple(
+            cast(dict[str, Any], row)
+            for row in cast(list[object], payload)
+            if isinstance(row, dict)
+        )
 
 
 def _positive_ids(values: Iterable[object]) -> tuple[int, ...]:
@@ -225,8 +229,9 @@ def _gate_for_killmail(
 ) -> tuple[Stargate, float, GateEvidence] | None:
     zkb = row.get("zkb")
     if isinstance(zkb, Mapping):
+        zkb = cast(Mapping[str, Any], zkb)
         try:
-            location_id = int(cast(Any, zkb.get("locationID", 0)))
+            location_id = int(zkb.get("locationID", 0))
         except (TypeError, ValueError):
             location_id = 0
         exact_gate = graph.gates.get(location_id)
@@ -236,7 +241,7 @@ def _gate_for_killmail(
     victim = row.get("victim")
     if not isinstance(victim, Mapping):
         return None
-    position = victim.get("position")
+    position = cast(Mapping[str, object], victim).get("position")
     if not isinstance(position, Mapping):
         return None
     try:
@@ -268,8 +273,8 @@ def classify_gate_threat(
     """Classify one killmail, returning ``None`` unless it is player PvP near a gate."""
 
     try:
-        killmail_id = int(cast(Any, row["killmail_id"]))
-        system_id = int(cast(Any, row["solar_system_id"]))
+        killmail_id = int(row["killmail_id"])
+        system_id = int(row["solar_system_id"])
         occurred_at = parse_esi_datetime(str(row["killmail_time"]))
     except (KeyError, TypeError, ValueError, OverflowError):
         return None
@@ -277,7 +282,10 @@ def classify_gate_threat(
     if system is None:
         return None
     zkb = row.get("zkb")
-    if not isinstance(zkb, Mapping) or bool(zkb.get("npc", False)):
+    if not isinstance(zkb, Mapping):
+        return None
+    zkb = cast(Mapping[str, object], zkb)
+    if bool(zkb.get("npc", False)):
         # This excludes pure NPC losses, including CONCORD destroying a ganker. Such a loss may be
         # evidence used by zKill's own post-processing, but it is not itself danger to a courier.
         return None
@@ -286,8 +294,9 @@ def classify_gate_threat(
         return None
     player_attackers = [
         cast(Mapping[str, Any], attacker)
-        for attacker in attackers_raw
-        if isinstance(attacker, Mapping) and attacker.get("character_id") is not None
+        for attacker in cast(list[object], attackers_raw)
+        if isinstance(attacker, Mapping)
+        and cast(Mapping[str, object], attacker).get("character_id") is not None
     ]
     if not player_attackers:
         return None
@@ -322,7 +331,9 @@ def classify_gate_threat(
     victim_group = graph.item_group(victim_ship_type_id)
     labels_raw = zkb.get("labels", [])
     labels = tuple(
-        sorted({str(label) for label in labels_raw}) if isinstance(labels_raw, list) else ()
+        sorted({str(label) for label in cast(list[object], labels_raw)})
+        if isinstance(labels_raw, list)
+        else ()
     )
 
     categories = {ThreatCategory.ANY_GATE_PVP}

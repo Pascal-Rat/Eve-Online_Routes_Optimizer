@@ -55,6 +55,7 @@ windows at least 1024 pixels wide and has no frontend build step.
 .venv/bin/ruff check src tools tests benchmarks browser_tests
 .venv/bin/ruff format --check src tools tests benchmarks browser_tests
 .venv/bin/mypy src tools tests benchmarks browser_tests
+.venv/bin/pyright --pythonpath .venv/bin/python
 .venv/bin/pytest
 .venv/bin/pytest browser_tests --no-cov --browser chromium --tracing retain-on-failure
 .venv/bin/python -m benchmarks.run_frozen --time-limit 10
@@ -67,9 +68,18 @@ synthetic local responses and exercise scanning, ranking, solving, arming, persi
 recovery, cancellation and asynchronous autocomplete. No frontend compiler or runtime dependency
 is needed beyond the browser. Live-network tests must remain opt-in.
 
+Pylance and the Pyright CLI share strict settings in `pyproject.toml`, covering source,
+tools, tests and benchmarks. VS Code defaults to this repository's `.venv`; select that
+interpreter explicitly if the workspace already remembers another one. Generated benchmark
+results are excluded from type checking. Narrow comments document incomplete OR-Tools 9.15
+stubs and intentional tests of private implementation details; do not disable diagnostic
+categories across the project to hide new errors.
+
 For solver or preprocessing changes, follow [benchmark methodology](docs/BENCHMARKS.md). Protect
 small hand-checkable optima and feasibility boundaries as well as representative workloads.
-Keep generated benchmark results, diagnostic dumps and validation logs out of commits.
+Keep generated benchmark results, diagnostic dumps, validation logs and working experiment
+reports out of commits. Store local research notes under the ignored `benchmarks/results/`
+directory; maintain lasting solver contracts and benchmark methodology in `docs/`.
 A safe reduction needs a mathematical reason it cannot remove an optimum. Heuristic caps must
 remain explicit and mark proof scope. An infeasible core needs an actual infeasibility proof; a
 relaxation incumbent must never be reported as a reward ceiling.

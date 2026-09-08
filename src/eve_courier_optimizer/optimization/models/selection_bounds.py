@@ -198,7 +198,7 @@ def add_resource_crossing_bounds(
         problem.mandatory_action_count + 2 * sum(selected.values())
     )
     max_crossings = c.horizon_seconds // c.travel.seconds_per_jump
-    result = []
+    result: list[ResourceCrossings] = []
     pivots = {c.start_system_id}
     if c.terminal_system_id is not None:
         pivots.add(c.terminal_system_id)
@@ -215,8 +215,8 @@ def add_resource_crossing_bounds(
         )
         if expression_magnitude >= 2**62:
             continue
-        layers = []
-        travel_terms = []
+        layers: list[tuple[int, cp_model.IntVar, cp_model.IntVar]] = []
+        travel_terms: list[cp_model.LinearExpr] = []
         for low, high in zip(levels, levels[1:], strict=False):
             outward = model.new_int_var(0, max_crossings, f"cross_out_{pivot}_{high}")
             inward = model.new_int_var(0, max_crossings, f"cross_in_{pivot}_{high}")
@@ -230,7 +230,7 @@ def add_resource_crossing_bounds(
             else:
                 model.add(outward - inward >= -start_side)
                 model.add(outward - inward <= 1 - start_side)
-            seen = set()
+            seen: set[tuple[bool, int, tuple[tuple[int | None, int], ...]]] = set()
             for capacity, resource_shipments in resources:
                 for source_side, crossings in ((False, outward), (True, inward)):
                     demand = tuple(

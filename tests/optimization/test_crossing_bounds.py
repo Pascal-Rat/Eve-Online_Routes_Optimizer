@@ -4,6 +4,7 @@ import random
 from dataclasses import replace
 from datetime import datetime, timedelta
 from itertools import combinations, permutations
+from unittest.mock import Mock
 
 import pytest
 from ortools.sat.python import cp_model
@@ -44,7 +45,7 @@ def test_integer_crossings_rule_out_a_fractional_return_trip(
     with monkeypatch.context() as patch:
         patch.setattr(
             "eve_courier_optimizer.optimization.models.system_tour.add_resource_crossing_bounds",
-            lambda *args: (),
+            Mock(return_value=()),
         )
         relaxed = SystemTourModel(problem, selection_cuts=SelectionCuts((), ())).solve(
             max_time_seconds=2
@@ -182,7 +183,7 @@ def test_master_bound_dominates_independent_optimum_after_graph_relabeling(
         )
         for cid in (11, 29, 83, 97)
     )
-    results = []
+    results: list[tuple[int, int]] = []
     for labels, ordered_jobs in (
         (tuple(range(1, size + 1)), jobs),
         (tuple(rng.sample(range(1000, 9000), size)), tuple(reversed(jobs))),

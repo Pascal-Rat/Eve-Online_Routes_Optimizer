@@ -133,7 +133,7 @@ def test_gate_threat_policy_validates_and_reports_its_exact_boundary() -> None:
         {"threat_categories": frozenset()},
     )
     for overrides in invalid_policies:
-        values = {
+        values: dict[str, object] = {
             "threat_avoided_system_ids": frozenset({20}),
             "threat_categories": frozenset({ThreatCategory.SMARTBOMB}),
             "threat_min_events": 1,

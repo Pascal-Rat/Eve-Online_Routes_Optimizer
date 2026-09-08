@@ -208,8 +208,9 @@ def test_web_validation_errors_are_explicit(tiny_graph: UniverseGraph, tmp_path:
     )
     with pytest.raises(ValueError, match="scan at least"):
         app.rank(planning_payload())
-    for regions, message in [([], "at least one"), ("Test Region", "at least one")]:
-        with pytest.raises(ValueError, match=message):
+    invalid_regions: list[object] = [[], "Test Region"]
+    for regions in invalid_regions:
+        with pytest.raises(ValueError, match="at least one"):
             app.scan({"regions": regions})
     for region in ["", "Missing Region", 999]:
         with pytest.raises(ValueError):
@@ -819,8 +820,14 @@ def test_run_local_web_ui_lifecycle(
         def server_close(self) -> None:
             events.append("close")
 
-    monkeypatch.setattr(webapp_module, "create_http_server", lambda app, port: FakeServer())
-    monkeypatch.setattr(webbrowser, "open", lambda url: events.append(("open", url)))
+    def create_server(app: PlanningWorkspace, port: int) -> FakeServer:
+        return FakeServer()
+
+    def open_browser(url: str) -> None:
+        events.append(("open", url))
+
+    monkeypatch.setattr(webapp_module, "create_http_server", create_server)
+    monkeypatch.setattr(webbrowser, "open", open_browser)
     assert run_local_web_ui(tiny_graph, port=8765, workspace=tmp_path) == 0
     assert events == [("open", "http://127.0.0.1:8765/"), ("serve", 0.25), "close"]
     assert "local web UI" in capsys.readouterr().out

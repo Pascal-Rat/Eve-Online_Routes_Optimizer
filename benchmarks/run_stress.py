@@ -14,7 +14,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 import eve_courier_optimizer
-from benchmarks.run_empire import FIXTURE, PROFILES, _constraints, load_empire_graph
+from benchmarks.run_empire import FIXTURE, PROFILES, benchmark_constraints, load_empire_graph
 from eve_courier_optimizer.domain import (
     CollateralMode,
     ContractSnapshot,
@@ -45,7 +45,7 @@ def prepare_case(name: str, *, seed: int = 17) -> tuple[UniverseGraph, RouteProb
         graph = load_empire_graph()
         snapshot = read_snapshot(FIXTURE)
         profile = PROFILES[1] if name == "empire_br_rolling" else PROFILES[0]
-        constraints = _constraints(graph, snapshot, profile)
+        constraints = benchmark_constraints(graph, snapshot, profile)
         if name == "empire_dst_2h":
             constraints = replace(
                 constraints,
@@ -74,7 +74,7 @@ def prepare_case(name: str, *, seed: int = 17) -> tuple[UniverseGraph, RouteProb
         metadata=SdeMetadata(1, now.isoformat(), "fixture://stress-v1"),
     )
     rng = random.Random(seed)
-    contracts = []
+    contracts: list[PublicCourierContract] = []
     for i in range(40 if corridor else 48):
         origin, dest = (1, 9) if corridor else rng.sample((1, 3, 5, 11, 13, 15, 21, 23, 25), 2)
         contracts.append(

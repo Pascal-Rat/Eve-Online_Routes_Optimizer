@@ -425,19 +425,19 @@ class SecurityPolicy:
     """
 
     minimum_security: float | None = 0.45
-    avoided_system_ids: frozenset[int] = field(default_factory=frozenset)
+    avoided_system_ids: frozenset[int] = field(default_factory=frozenset[int])
     allowed_bands: frozenset[SecurityBand] | None = None
-    gank_avoided_system_ids: frozenset[int] = field(default_factory=frozenset)
+    gank_avoided_system_ids: frozenset[int] = field(default_factory=frozenset[int])
     gank_ship_kill_threshold: int | None = None
     gank_activity_fetched_at: datetime | None = None
-    threat_avoided_system_ids: frozenset[int] = field(default_factory=frozenset)
-    threat_categories: frozenset[ThreatCategory] = field(default_factory=frozenset)
+    threat_avoided_system_ids: frozenset[int] = field(default_factory=frozenset[int])
+    threat_categories: frozenset[ThreatCategory] = field(default_factory=frozenset[ThreatCategory])
     threat_min_events: int | None = None
     threat_intel_fetched_at: datetime | None = None
     threat_window_seconds: int | None = None
     threat_gate_radius_m: int | None = None
-    threat_coverage_region_ids: frozenset[int] = field(default_factory=frozenset)
-    threat_incomplete_region_ids: frozenset[int] = field(default_factory=frozenset)
+    threat_coverage_region_ids: frozenset[int] = field(default_factory=frozenset[int])
+    threat_incomplete_region_ids: frozenset[int] = field(default_factory=frozenset[int])
 
     def __post_init__(self) -> None:
         if self.minimum_security is not None and not math.isfinite(self.minimum_security):

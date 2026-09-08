@@ -19,6 +19,3 @@ plan*.json
 execution*.json
 replan*.json
 *.sqlite3-journal
-
-# Private solver working studies must never be published.
-docs/SOLVER_*_STUDY.md

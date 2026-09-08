@@ -105,7 +105,7 @@ def snapshot_from_dict(payload: dict[str, object]) -> ContractSnapshot:
     if not isinstance(raw_contracts, list):
         raise ValueError("snapshot contracts must be a list")
     contracts: list[PublicCourierContract] = []
-    for raw in raw_contracts:
+    for raw in cast(list[object], raw_contracts):
         if not isinstance(raw, dict):
             raise ValueError("snapshot contract must be an object")
         contracts.append(contract_from_dict(cast(dict[str, object], raw)))
@@ -113,7 +113,7 @@ def snapshot_from_dict(payload: dict[str, object]) -> ContractSnapshot:
     if not isinstance(raw_activity, list):
         raise ValueError("snapshot system_kill_activity must be a list")
     activity: list[SystemKillActivity] = []
-    for raw in raw_activity:
+    for raw in cast(list[object], raw_activity):
         if not isinstance(raw, dict):
             raise ValueError("snapshot system-kill activity must be an object")
         row = cast(dict[str, object], raw)
@@ -157,7 +157,7 @@ def snapshot_from_dict(payload: dict[str, object]) -> ContractSnapshot:
         raw_events = threat.get("gate_events", [])
         if not isinstance(raw_events, list):
             raise ValueError("snapshot gate_events must be a list")
-        for raw_event in raw_events:
+        for raw_event in cast(list[object], raw_events):
             if not isinstance(raw_event, dict):
                 raise ValueError("snapshot gate-threat event must be an object")
             event = cast(dict[str, object], raw_event)

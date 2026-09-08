@@ -76,7 +76,7 @@ def solve_batches(
     ]
     for i, variable in enumerate(selected):
         model.add(sum(assigned[i]) == variable)
-    batch_rewards = []
+    batch_rewards: list[cp_model.LinearExpr | int] = []
     for b in range(trips):
         count = sum(assigned[i][b] for i in range(len(items)))
         model.add(count >= used[b])
@@ -127,7 +127,7 @@ def solve_batches(
             time.perf_counter() - started,
         )
     visits: list[PlannedAction] = []
-    ids = []
+    ids: list[int] = []
     for b in range(trips):
         batch = sorted(item.contract_id for i, item in enumerate(items) if cp.value(assigned[i][b]))
         ids.extend(batch)

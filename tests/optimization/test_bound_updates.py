@@ -6,10 +6,12 @@ import math
 import random
 from datetime import datetime
 from itertools import product
+from unittest.mock import Mock
 
 import pytest
 from ortools.sat.python import cp_model
 
+# The response solution sequence exists at runtime but is untyped in OR-Tools 9.15.
 from eve_courier_optimizer.domain import ProofStatus
 from eve_courier_optimizer.optimization import RouteOptimizer, SolverConfig
 from eve_courier_optimizer.optimization.models.selection_bounds import RewardBoundRecorder
@@ -46,7 +48,7 @@ def interrupt_before_solution(monkeypatch: pytest.MonkeyPatch, *, presolve: bool
         solver.parameters.stop_after_root_propagation = not presolve
         status = solve(solver, model)
         assert status == cp_model.UNKNOWN
-        assert not solver.response_proto.solution
+        assert not solver.response_proto.solution  # pyright: ignore[reportUnknownMemberType]
         if presolve:
             assert solver.best_objective_bound == 0
         return status
@@ -141,14 +143,14 @@ def test_bound_event_can_close_proof_without_a_solver_solution(
         solver.best_bound_callback = stop_at_bound
         status = solve(solver, model)
         assert status == cp_model.UNKNOWN
-        assert not solver.response_proto.solution
+        assert not solver.response_proto.solution  # pyright: ignore[reportUnknownMemberType]
         return status
 
     monkeypatch.setattr(cp_model.CpSolver, "solve", interrupted)
     if stage == "master":
         monkeypatch.setattr(
             "eve_courier_optimizer.optimization.search.haul_batches.solve_batches",
-            lambda *args, **kwargs: None,
+            Mock(return_value=None),
         )
     result = RouteOptimizer(
         problem,
@@ -216,6 +218,6 @@ def test_interrupted_bound_events_dominate_enumerated_optima(workers: int) -> No
 
         solver.best_bound_callback = stop_at_bound
         assert solver.solve(model) == cp_model.UNKNOWN
-        assert not solver.response_proto.solution
+        assert not solver.response_proto.solution  # pyright: ignore[reportUnknownMemberType]
         assert recorder.upper_bound_units is not None
         assert recorder.upper_bound_units >= optimum

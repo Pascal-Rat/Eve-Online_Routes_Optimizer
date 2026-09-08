@@ -49,7 +49,10 @@ class BenchmarkResult:
 
 def _load_fixture() -> dict[str, Any]:
     payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict) or payload.get("fixture_version") != 1:
+    if (
+        not isinstance(payload, dict)
+        or cast(dict[str, object], payload).get("fixture_version") != 1
+    ):
         raise ValueError("unsupported frozen benchmark fixture")
     return cast(dict[str, Any], payload)
 

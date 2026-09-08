@@ -105,7 +105,11 @@ def _run_job(
         )
         session.snapshot = inputs.snapshot
         session.trip = inputs.trip
-        session.planner.progress = lambda message: connection.send(Progress(message))
+
+        def report_progress(message: str) -> None:
+            connection.send(Progress(message))
+
+        session.planner.progress = report_progress
         if session.zkill is not None:
             # Cancellation can interrupt a request; preserve request spacing across workers.
             session.zkill.defer_next_request()

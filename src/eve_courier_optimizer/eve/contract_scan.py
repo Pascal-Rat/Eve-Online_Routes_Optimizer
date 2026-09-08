@@ -38,7 +38,7 @@ def _scan_contract_regions(
         thread_name_prefix="esi-courier-region",
     ) as executor:
         values = executor.map(client.public_couriers, region_ids)
-        contracts = {}
+        contracts: dict[int, tuple[PublicCourierContract, ...]] = {}
         for index, (region_id, rows) in enumerate(zip(region_ids, values, strict=True), 1):
             contracts[region_id] = rows
             if progress:
@@ -87,7 +87,7 @@ def scan_public_couriers(
     if include_threat_intel and not threat_regions:
         raise ValueError("at least one threat region is required when threat intel is enabled")
 
-    contracts_by_id = {}
+    contracts_by_id: dict[int, PublicCourierContract] = {}
     if progress:
         progress("Scanning public contract regions")
     contracts_by_region = _scan_contract_regions(

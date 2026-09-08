@@ -107,7 +107,7 @@ def solve_subset(
     feasible_masks: set[int] = set()
 
     def result() -> SubsetSearchResult:
-        actions = []
+        actions: list[PlannedAction] = []
         label = best_label
         while label is not None and label != 0:
             _, _, _, parent, action = labels[label]

@@ -9,8 +9,12 @@ import json
 import platform
 import sys
 import time
+
+# OR-Tools 9.15 omits repeated-proto property types; these reads only require len().
+from collections.abc import Sized
 from importlib.metadata import version
 from pathlib import Path
+from typing import cast
 
 import eve_courier_optimizer
 from benchmarks.run_stress import CASES, prepare_case
@@ -72,10 +76,10 @@ def measure(case: str, *, seed: int) -> dict[str, object]:
         "verified": simulation.report.valid,
         "pairs": len(cuts.pairs),
         "cliques": len(cuts.cliques),
-        "master_variables": len(master.model.proto.variables),
-        "master_constraints": len(master.model.proto.constraints),
-        "event_variables": len(route.model.proto.variables),
-        "event_constraints": len(route.model.proto.constraints),
+        "master_variables": len(cast(Sized, master.model.proto.variables)),  # pyright: ignore[reportUnknownMemberType]
+        "master_constraints": len(cast(Sized, master.model.proto.constraints)),  # pyright: ignore[reportUnknownMemberType]
+        "event_variables": len(cast(Sized, route.model.proto.variables)),  # pyright: ignore[reportUnknownMemberType]
+        "event_constraints": len(cast(Sized, route.model.proto.constraints)),  # pyright: ignore[reportUnknownMemberType]
         "event_arcs": len(route.arc_is_used),
         "event_sha256": hashlib.sha256(str(route.model.proto).encode()).hexdigest(),
         "master_sha256": hashlib.sha256(str(master.model.proto).encode()).hexdigest(),

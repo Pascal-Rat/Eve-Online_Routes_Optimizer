@@ -8,7 +8,7 @@ import eve_courier_optimizer
 
 PACKAGE = "eve_courier_optimizer"
 SOURCE = Path(eve_courier_optimizer.__file__).parent
-ALLOWED_DEPENDENCIES = {
+ALLOWED_DEPENDENCIES: dict[str, set[str]] = {
     "domain": set(),
     "jsonio": set(),
     "routing": {"domain", "jsonio", "routing"},
@@ -42,7 +42,7 @@ def imports(path: Path) -> list[str]:
                 if node.level
                 else node.module or ""
             )
-            children = []
+            children: list[str] = []
             for alias in node.names:
                 child = target + "." + alias.name
                 if child.startswith(PACKAGE + "."):
@@ -54,7 +54,7 @@ def imports(path: Path) -> list[str]:
 
 
 def test_dependencies_follow_domain_and_interface_boundaries() -> None:
-    violations = []
+    violations: list[str] = []
     for path in SOURCE.rglob("*.py"):
         relative = path.relative_to(SOURCE).with_suffix("")
         owner = relative.parts[0]

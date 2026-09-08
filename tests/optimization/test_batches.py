@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 from dataclasses import replace
 from datetime import datetime, timedelta
+from unittest.mock import Mock
 
 import pytest
 from ortools.sat.python import cp_model
@@ -129,7 +130,7 @@ def test_unknown_batch_response_has_no_default_zero_ceiling(
     p = RouteProblem.from_snapshot(
         make_snapshot(now, make_contract(now, 1, 101, 103)), tiny_graph, constraints(now)
     )
-    monkeypatch.setattr(cp_model.CpSolver, "solve", lambda *args, **kwargs: cp_model.UNKNOWN)
+    monkeypatch.setattr(cp_model.CpSolver, "solve", Mock(return_value=cp_model.UNKNOWN))
     answer = solve_batches(p, max_time_seconds=1)
     assert answer is not None and not answer.complete and answer.upper_bound_units is None
 
@@ -153,11 +154,11 @@ def test_batch_witness_and_ceiling_survive_unknown_master(
     partial = replace(answer, complete=False, upper_bound_units=answer.upper_bound_units + 1)
     monkeypatch.setattr(
         "eve_courier_optimizer.optimization.search.haul_batches.solve_batches",
-        lambda *args, **kwargs: partial,
+        Mock(return_value=partial),
     )
     monkeypatch.setattr(
         "eve_courier_optimizer.optimization.models.system_tour.SystemTourModel.solve",
-        lambda *args, **kwargs: SystemRewardBound("UNKNOWN", None, None, 0.0, 0, 0, 2),
+        Mock(return_value=SystemRewardBound("UNKNOWN", None, None, 0.0, 0, 0, 2)),
     )
     result = ContractSelectionSearch(p, tiny_graph, SolverConfig()).run()
     assert result.incumbent is not None and result.incumbent.simulation.report.valid

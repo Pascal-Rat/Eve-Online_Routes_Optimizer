@@ -32,6 +32,7 @@ Issues = "https://github.com/Pascal-Rat/Eve-Online_Routes_Optimizer/issues"
 browser = ["pytest-playwright>=0.7,<1"]
 dev = [
     "mypy>=1.15,<3",
+    "pyright>=1.1.411,<2",
     "pytest>=8.3,<10",
     "pytest-cov>=6,<8",
     "ruff>=0.11,<1",
@@ -60,6 +61,14 @@ python_version = "3.12"
 strict = true
 warn_unreachable = true
 show_error_codes = true
+exclude = ["^benchmarks/results/"]
+
+[tool.pyright]
+include = ["src", "tools", "tests", "benchmarks", "browser_tests"]
+exclude = ["benchmarks/results"]
+extraPaths = ["src", "."]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
 
 [[tool.mypy.overrides]]
 module = ["ortools.*"]

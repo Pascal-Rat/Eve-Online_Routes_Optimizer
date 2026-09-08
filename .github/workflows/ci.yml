@@ -27,6 +27,7 @@ jobs:
       - run: ruff check src tools tests benchmarks
       - run: ruff format --check src tools tests benchmarks
       - run: mypy src tools tests benchmarks
+      - run: pyright src tools tests benchmarks
       - run: pytest
       - run: PYTHONPATH=src python -m benchmarks.run_frozen --time-limit 10
       - run: PYTHONPATH=src python -m benchmarks.run_empire --time-limit 60
@@ -46,6 +47,7 @@ jobs:
       - run: ruff check browser_tests
       - run: ruff format --check browser_tests
       - run: mypy browser_tests
+      - run: pyright browser_tests
       - run: pytest browser_tests --no-cov --browser chromium --tracing retain-on-failure
       - uses: actions/upload-artifact@v4
         if: failure()

@@ -145,7 +145,7 @@ def decorate_plan(
                     "id": system_id,
                     "name": graph.systems[system_id].name,
                 }
-                for raw_id in raw_ids
+                for raw_id in cast(list[int | str], raw_ids)
                 if (system_id := int(raw_id)) in graph.systems
             ]
 
@@ -165,7 +165,7 @@ def decorate_plan(
         if execution is not None
         else {}
     )
-    for raw_step in route:
+    for raw_step in cast(list[object], route):
         if not isinstance(raw_step, dict):
             continue
         step = cast(JsonObject, raw_step)
@@ -180,9 +180,9 @@ def _decorate_jump_path(payload: JsonObject, graph: UniverseGraph) -> None:
     raw_path = payload.get("jump_path")
     if not isinstance(raw_path, list):
         return
-    payload["jump_count"] = max(0, len(raw_path) - 1)
+    payload["jump_count"] = max(0, len(cast(list[object], raw_path)) - 1)
     path_systems: list[JsonObject] = []
-    for raw_system_id in raw_path:
+    for raw_system_id in cast(list[int | str], raw_path):
         system_id = int(raw_system_id)
         path_system = graph.systems.get(system_id)
         path_systems.append(
@@ -206,7 +206,7 @@ def _decorate_travel_legs(payload: JsonObject, graph: UniverseGraph) -> None:
     raw_legs = payload.get("travel_legs")
     if not isinstance(raw_legs, list):
         return
-    for raw_leg in raw_legs:
+    for raw_leg in cast(list[object], raw_legs):
         if not isinstance(raw_leg, dict):
             continue
         leg = cast(JsonObject, raw_leg)

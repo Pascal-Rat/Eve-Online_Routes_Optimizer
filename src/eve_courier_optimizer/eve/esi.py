@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 from urllib.parse import urlencode
 
 from eve_courier_optimizer.domain import (
@@ -168,7 +168,7 @@ class EsiClient:
         if not isinstance(payload, list):
             raise EsiError("public-contract response was not a list")
         try:
-            rows = [json_object(row, "public contract") for row in payload]
+            rows = [json_object(row, "public contract") for row in cast(list[object], payload)]
             pages = int(headers.get("x-pages", "1"))
             if pages < 1:
                 raise ValueError("page count must be positive")
@@ -211,10 +211,10 @@ class EsiClient:
         if not isinstance(payload, list):
             raise EsiError("system-kills response was not a list")
         by_system: dict[int, SystemKillActivity] = {}
-        for raw in payload:
+        for raw in cast(list[object], payload):
             if not isinstance(raw, dict):
                 continue
-            row = json_object(raw, "system kills")
+            row = json_object(cast(dict[object, object], raw), "system kills")
             try:
                 item = SystemKillActivity(
                     system_id=json_int(row["system_id"], "system_id"),

@@ -252,10 +252,13 @@ def test_cli_live_departure_and_embedded_accepted_pickup(
 
     clock = MutableClock(now)
     monkeypatch.setattr(cli_module, "load_bundled_graph", lambda: tiny_graph)
-    parse_time = cli_module._parse_time
-    monkeypatch.setattr(
-        cli_module, "_parse_time", lambda value: clock() if value == "now" else parse_time(value)
-    )
+    # Exercise the CLI's clock seam without changing its public command interface.
+    parse_time = cli_module._parse_time  # pyright: ignore[reportPrivateUsage]
+
+    def parse_at_clock(value: str) -> datetime:
+        return clock() if value == "now" else parse_time(value)
+
+    monkeypatch.setattr(cli_module, "_parse_time", parse_at_clock)
     snapshot = make_snapshot(now, make_contract(now, 1, 101, 102))
     snapshot_path, state_path, plan_path = (
         tmp_path / name for name in ("snapshot.json", "state.json", "plan.json")

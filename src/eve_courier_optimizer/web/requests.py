@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
+from typing import cast
 
 from eve_courier_optimizer.domain import (
     CollateralMode,
@@ -56,7 +57,9 @@ class ScanRequest:
             raw_regions = body.get("regions")
             if not isinstance(raw_regions, list) or not raw_regions:
                 raise ValueError("regions must contain at least one region name or ID")
-            region_ids = tuple(graph.resolve_region(value) for value in raw_regions)
+            region_ids = tuple(
+                graph.resolve_region(value) for value in cast(list[object], raw_regions)
+            )
         else:
             raise ValueError("region_scope must be selected, security, empire, or all")
         include_threat = fields.boolean("include_threat_intel", default=False)
@@ -205,7 +208,7 @@ class FormFields:
         if isinstance(raw, str):
             return [value.strip() for value in raw.split(",") if value.strip()]
         if isinstance(raw, list):
-            return [str(value) for value in raw]
+            return [str(value) for value in cast(list[object], raw)]
         raise ValueError(f"{name} must be a list or comma-separated string")
 
 
@@ -235,7 +238,7 @@ def _security_bands(body: dict[str, object]) -> frozenset[SecurityBand]:
     if not isinstance(raw, list):
         raise ValueError("security_bands must be a list")
     try:
-        bands = frozenset(SecurityBand(str(value)) for value in raw)
+        bands = frozenset(SecurityBand(str(value)) for value in cast(list[object], raw))
     except ValueError as error:
         raise ValueError("security_bands may contain only high, low, and null") from error
     if not bands:
@@ -256,7 +259,9 @@ def _route_security(
             if not isinstance(raw, list):
                 raise ValueError("threat_categories must be a list")
             try:
-                categories = frozenset(ThreatCategory(str(value)) for value in raw)
+                categories = frozenset(
+                    ThreatCategory(str(value)) for value in cast(list[object], raw)
+                )
             except ValueError as error:
                 raise ValueError("threat_categories contains an unknown category") from error
             if not categories:

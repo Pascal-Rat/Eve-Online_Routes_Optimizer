@@ -79,17 +79,21 @@ class PlanningWorkspace:
             self.trip = read_trip(self.trip_path)
         if self.plan_path.exists():
             raw = json.loads(self.plan_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                return
+            raw = cast(JsonObject, raw)
+            scope = raw.get("scope")
             if (
-                isinstance(raw, dict)
-                and raw.get("schema_version") == 3
-                and isinstance(raw.get("scope"), dict)
+                raw.get("schema_version") == 3
+                and isinstance(scope, dict)
                 and self.snapshot is not None
-                and raw.get("scope", {}).get("snapshot_fetched_at")
+                and cast(dict[str, object], scope).get("snapshot_fetched_at")
                 == self.snapshot.fetched_at.isoformat()
-                and raw.get("scope", {}).get("sde_build_number") == self.graph.metadata.build_number
+                and cast(dict[str, object], scope).get("sde_build_number")
+                == self.graph.metadata.build_number
             ):
                 self.plan_payload = responses.decorate_plan(
-                    cast(JsonObject, raw), self.graph, self.snapshot, self.trip
+                    raw, self.graph, self.snapshot, self.trip
                 )
 
     def discard_plan(self) -> None:

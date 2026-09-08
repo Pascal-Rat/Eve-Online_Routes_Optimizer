@@ -39,11 +39,11 @@ def main() -> int:
         parser.error("--build-number and --release-date must be supplied together")
     if explicit_build and arguments.zip_path is None:
         parser.error("explicit build metadata requires --zip")
-    build = (
-        LatestBuild(arguments.build_number, arguments.release_date)
-        if explicit_build
-        else fetch_latest_build()
-    )
+    if explicit_build:
+        assert arguments.build_number is not None and arguments.release_date is not None
+        build = LatestBuild(arguments.build_number, arguments.release_date)
+    else:
+        build = fetch_latest_build()
     zip_path = arguments.zip_path
     if zip_path is None:
         zip_path = Path(".cache") / f"eve-sde-{build.build_number}-jsonl.zip"

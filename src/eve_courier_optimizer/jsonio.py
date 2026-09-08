@@ -10,7 +10,9 @@ from typing import cast
 
 
 def json_object(value: object, label: str) -> dict[str, object]:
-    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    if any(not isinstance(key, str) for key in cast(dict[object, object], value)):
         raise ValueError(f"{label} must be an object")
     return cast(dict[str, object], value)
 
