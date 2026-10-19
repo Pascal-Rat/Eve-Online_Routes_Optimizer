@@ -2,7 +2,7 @@
 
 ## Supported version
 
-Security fixes target the latest release on the default branch.
+Security fixes target the current code on the default branch.
 
 ## Reporting a vulnerability
 

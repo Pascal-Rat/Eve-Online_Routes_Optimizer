@@ -166,7 +166,6 @@ The browser interface uses the current time and rechecks the itinerary when you 
 | Inspect reproducible results | [Benchmarks](docs/BENCHMARKS.md) — fixed inputs, known best rewards and comparison commands |
 | Review the mathematics | [Optimization and proof](docs/OPTIMIZATION.md) — models, bounds, correctness arguments and budgets |
 | Integrate with saved data or the local API | [Interfaces](docs/INTERFACES.md) — file formats, storage and endpoints |
-| Report a bug or improve the project | [Contributing](CONTRIBUTING.md) — useful contributions, code map and validation |
 
 Project-owned code and documentation are [MIT licensed](LICENSE). EVE Online and related game data
 belong to CCP Games; this independent project is not affiliated with CCP. See

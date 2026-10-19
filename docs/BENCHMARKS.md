@@ -28,8 +28,9 @@ seeds control both contract generation and solver search; Empire inputs are fixe
 the seed. Known optima are enforced by the runners and tests.
 
 Run these commands from the repository root after the
-[development setup](../CONTRIBUTING.md#set-up-a-development-environment). They use bundled inputs
-and do not scan the live market. On Windows, replace `.venv/bin/python` with
+[local setup](../README.md#run-it-locally). Install the optional test dependencies with
+`.venv/bin/python -m pip install -e ".[dev]"` before running the pytest checks below.
+The benchmarks use bundled inputs and do not scan the live market. On Windows, replace `.venv/bin/python` with
 `.\.venv\Scripts\python.exe` and put multiline commands on one line.
 
 ```bash
