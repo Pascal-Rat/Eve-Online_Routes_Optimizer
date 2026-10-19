@@ -22,16 +22,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-      - uses: actions/download-artifact@v4
-        with:
-          name: distributions-${{ github.sha }}
-          path: dist/
-      - name: Verify the exact artifacts that passed validation
-        run: python tools/check_release.py --tag "$GITHUB_REF_NAME" --verify-manifest
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

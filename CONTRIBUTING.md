@@ -116,12 +116,15 @@ IDs generate the browser declarations and validators: after changing them, run
 `python tools/generate_web_contracts.py` and commit the generated files. Live-network tests remain
 opt-in.
 
-Release tags must exactly match the source version. The release workflow runs the same-commit CI,
-builds once, validates wheel/sdist versions and records SHA-256 hashes. Installed-wheel smoke jobs
-cover Linux Python 3.12 and 3.13, Windows 3.12 and macOS 3.12. Publication depends on every check and
-uses those same artifacts. To smoke-test locally, install the wheel into a separate virtual
-environment, then run `tools/smoke_installed.py --manifest dist/release-manifest.json` with that
-environment's interpreter; it rejects an import from checkout sources.
+CI runs on Linux with Python 3.12. The build job validates wheel/sdist versions and tests the
+installed wheel in the same job. CI does not upload or download Actions artifacts or persist
+dependency caches; generated files remain on the disposable runner.
+
+Release tags must exactly match the source version. The release workflow runs the same-commit CI
+before creating a GitHub release with generated notes and no attached build packages. To smoke-test
+locally, install the wheel into a separate virtual environment, then run
+`tools/smoke_installed.py --manifest dist/release-manifest.json` with that environment's interpreter;
+it rejects an import from checkout sources.
 
 Pylance and the Pyright CLI share strict settings in `pyproject.toml`, covering source,
 tools, tests and benchmarks. VS Code defaults to this repository's `.venv`; select that
