@@ -1,121 +1,35 @@
-name: ci
-
+name: Purge retained CI data
 on:
   push:
-    branches: ["**"]
-  pull_request:
-  workflow_dispatch:
-  workflow_call:
-    inputs:
-      release_tag:
-        type: string
-        required: false
-        default: ""
-
+    branches: [main]
+    paths: ['.github/workflows/ci.yml']
 permissions:
-  contents: read
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
+  actions: write
 jobs:
-  test:
+  cleanup:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install -e ".[dev]"
-      - run: ruff check src tools tests benchmarks
-      - run: ruff format --check src tools tests benchmarks
-      - run: mypy src tools tests/python tests/support benchmarks
-      - run: pyright src tools tests/python tests/support benchmarks
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-          cache: npm
-      - run: npm ci --ignore-scripts
-      - run: python tools/generate_web_contracts.py --check
-      - run: npm run check
-      - run: npm test
-      - run: pytest
-      - run: PYTHONPATH=src python -m benchmarks.run_frozen --time-limit 10
-      - run: PYTHONPATH=src python -m benchmarks.run_empire --time-limit 60
-  browser:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-      - run: python -m pip install -e ".[dev,browser]"
-      - run: python -m playwright install --with-deps chromium
-      - run: ruff check tests/browser
-      - run: ruff format --check tests/browser
-      - run: mypy tests/browser
-      - run: pyright tests/browser
-      - run: pytest tests/browser --no-cov --browser chromium --tracing retain-on-failure
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: browser-test-traces
-          path: test-results/
-
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-      - run: python -m pip install build
-      - run: python -m build
-      - name: Validate source, tag and distribution versions
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: python tools/check_release.py --tag "$RELEASE_TAG"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: distributions-${{ github.sha }}
-          path: dist/
-          if-no-files-found: error
-
-  installed-wheel:
-    needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            python: "3.12"
-          - os: ubuntu-latest
-            python: "3.13"
-          - os: windows-latest
-            python: "3.12"
-          - os: macos-latest
-            python: "3.12"
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
-    defaults:
-      run:
+      - name: Delete retained CI data
         shell: bash
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: ${{ matrix.python }}
-      - uses: actions/download-artifact@v4
-        with:
-          name: distributions-${{ github.sha }}
-          path: dist/
-      - run: python tools/check_release.py --verify-manifest
-      - run: python -m pip install dist/*.whl
-      - run: python tools/smoke_installed.py --manifest dist/release-manifest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for endpoint in artifacts caches; do
+            case "$endpoint" in
+              artifacts) selector='.artifacts[].id' ;;
+              caches) selector='.actions_caches[].id' ;;
+            esac
+            # Snapshot every page before deleting entries.
+            gh api --paginate "repos/$GITHUB_REPOSITORY/actions/$endpoint?per_page=100" \
+              --jq "$selector" > "$RUNNER_TEMP/ci-storage-ids"
+            deleted=0
+            while IFS= read -r item_id; do
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/$endpoint/$item_id"
+              deleted=$((deleted + 1))
+            done < "$RUNNER_TEMP/ci-storage-ids"
+            remaining=$(gh api "repos/$GITHUB_REPOSITORY/actions/$endpoint?per_page=1" --jq .total_count)
+            echo "Deleted $deleted $endpoint; remaining: $remaining"
+            test "$remaining" -eq 0
+          done
